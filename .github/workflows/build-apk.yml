@@ -2,7 +2,6 @@ name: Build Freedom Debug APK
 
 on:
   push:
-    branches: [ main, master ]
   workflow_dispatch:
 
 jobs:
@@ -30,6 +29,7 @@ jobs:
           SDKMANAGER=""
           for candidate in \
             "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" \
+            "$SDK_ROOT/cmdline-tools/16.0/bin/sdkmanager" \
             "$(command -v sdkmanager 2>/dev/null || true)" \
             $(find "$SDK_ROOT/cmdline-tools" -maxdepth 3 -name sdkmanager 2>/dev/null || true); do
             if [ -n "$candidate" ] && [ -x "$candidate" ]; then
@@ -49,8 +49,9 @@ jobs:
           fi
 
           echo "Using sdkmanager: $SDKMANAGER"
-          yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses > /dev/null || true
-          "$SDKMANAGER" --sdk_root="$SDK_ROOT" "platform-tools" "build-tools;36.0.0" "platforms;android-36" "platforms;android-36.1"
+          yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses >/dev/null 2>&1 || true
+          "$SDKMANAGER" --sdk_root="$SDK_ROOT" "platform-tools" "build-tools;36.0.0" "platforms;android-36" || true
+          "$SDKMANAGER" --sdk_root="$SDK_ROOT" "platforms;android-36.1" || true
 
       - name: Prepare debug keystore
         run: |
