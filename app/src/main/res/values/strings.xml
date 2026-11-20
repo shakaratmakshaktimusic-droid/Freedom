@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Freedom</string>
+
+    <!-- 4-Tab Navigation -->
+    <string name="nav_today">Today</string>
+    <string name="nav_sessions">Sessions</string>
+    <string name="nav_blocklists">Blocklists</string>
+    <string name="nav_settings">Settings</string>
+
+    <!-- Accessibility, Notification Listener & Device Admin -->
+    <string name="accessibility_service_label">Freedom Focus Blocker</string>
+    <string name="accessibility_service_description">Monitors active windows during Freedom focus sessions to enforce your app allowlist, block distracting websites and in-app web links without a VPN, and protect Settings during Locked Mode.</string>
+    <string name="notification_listener_label">Freedom Notification Shield</string>
+    <string name="device_admin_label">Freedom Uninstall Protection</string>
+    <string name="device_admin_description">Prevents uninstalling Freedom while Locked Mode is active. Freedom requests zero wipe or lock policies.</string>
+
+    <!-- Notifications -->
+    <string name="channel_active_session_name">Active Focus Session</string>
+    <string name="channel_active_session_desc">Shows live countdown and lock status while a Freedom blocking session is active.</string>
+    <string name="channel_alerts_name">Session Alerts</string>
+    <string name="channel_alerts_desc">Notifies when scheduled sessions begin or end.</string>
+    <string name="notif_active_title_strict">Freedom Locked Mode Active</string>
+    <string name="notif_active_title_normal">Freedom Focus Active</string>
+    <string name="notif_session_ended_title">Focus session complete</string>
+    <string name="notif_session_ended_body">All apps and websites are now unlocked.</string>
+
+    <!-- Block Screen -->
+    <string name="block_title_app">Blocked by Freedom</string>
+    <string name="block_title_tamper">Settings Emergency Wait</string>
+    <string name="block_subtitle_tamper">Stay on this screen for 5 minutes to unlock Android Settings for 3 minutes.</string>
+    <string name="block_return_home">Return Home</string>
+    <string name="block_open_freedom">Open Freedom</string>
+    <string name="block_allowed_apps_header">ALLOWED APPS</string>
+
+    <!-- Common Actions & Labels -->
+    <string name="action_start_session">START A SESSION</string>
+    <string name="action_stop_session">End Session</string>
+    <string name="action_save">Save</string>
+    <string name="action_cancel">Cancel</string>
+    <string name="action_delete">Delete</string>
+    <string name="strict_mode_label">Locked Mode</string>
+</resources>

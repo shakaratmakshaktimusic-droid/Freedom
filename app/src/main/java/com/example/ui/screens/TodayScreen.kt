@@ -1,0 +1,432 @@
+package com.example.ui.screens
+
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
+import androidx.compose.material.icons.rounded.KeyboardArrowUp
+import androidx.compose.material.icons.rounded.Lock
+import androidx.compose.material.icons.rounded.Schedule
+import androidx.compose.material.icons.rounded.Shield
+import androidx.compose.material.icons.rounded.WarningAmber
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.example.blocker.FreedomMonitorService
+import com.example.domain.ScheduleCalculator
+import com.example.domain.WebsiteCategory
+import com.example.ui.FreedomUiState
+import com.example.ui.theme.FreedomGlass
+import com.example.ui.theme.FreedomSwitch
+import com.example.ui.theme.GlassCard
+import com.example.ui.theme.GlassDivider
+import com.example.ui.theme.GlassPillButton
+import com.example.ui.theme.JetBrainsMono
+import java.text.SimpleDateFormat
+import java.util.Calendar
+import java.util.Date
+import java.util.Locale
+
+/**
+ * Clean Today dashboard inspired by the reference screenshot:
+ *  - Calm time-of-day greeting + shield readiness pill (no fake crowd counters or upsells)
+ *  - Primary START A SESSION CTA pill
+ *  - Collapsible Active Sessions glass card
+ *  - Collapsible Scheduled Sessions glass card (Later & Recurring)
+ */
+@Composable
+fun TodayScreen(
+    uiState: FreedomUiState,
+    onStartSessionClick: () -> Unit,
+    onStopSession: () -> Unit,
+    onExtendSession: (Int) -> Unit,
+    onToggleSchedule: (com.example.data.local.ScheduleEntity, Boolean) -> Unit,
+    onOpenSettingsPermissions: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val g = FreedomGlass.colors
+    var activeExpanded by remember { mutableStateOf(true) }
+    var scheduledExpanded by remember { mutableStateOf(true) }
+
+    val greeting = remember {
+        val hour = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
+        when {
+            hour < 12 -> "Good Morning"
+            hour < 17 -> "Good Afternoon"
+            else -> "Good Evening"
+        }
+    }
+
+    val activeSession = uiState.activeSession?.takeIf { it.active && uiState.remainingMillis > 0L }
+    val enabledSchedules = uiState.schedules.filter { it.enabled }
+    val perms = uiState.permissions
+    val isReady = perms?.isCoreBlockingReady == true
+
+    LazyColumn(
+        modifier = modifier.fillMaxSize(),
+        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 20.dp),
+        verticalArrangement = Arrangement.spacedBy(20.dp)
+    ) {
+        // Header with brand mark + shield readiness indicator
+        item {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(CircleShape)
+                            .background(g.primarySoft),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Shield,
+                            contentDescription = "Freedom",
+                            tint = g.primaryAccent,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    Text(
+                        text = "Freedom",
+                        style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
+                        color = g.textPrimary
+                    )
+                }
+
+                // Shield status pill
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(50))
+                        .background(g.glassSurface)
+                        .clickable { onOpenSettingsPermissions() }
+                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                        .testTag("today_shield_status_pill"),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = if (isReady) Icons.Rounded.Shield else Icons.Rounded.WarningAmber,
+                        contentDescription = null,
+                        tint = if (isReady) g.shieldActive else g.lockedAmber,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text = if (isReady) "Shield Ready" else "Setup Needed",
+                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                        color = if (isReady) g.shieldActive else g.lockedAmber
+                    )
+                }
+            }
+        }
+
+        // Greeting + Primary CTA
+        item {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = greeting,
+                    style = MaterialTheme.typography.headlineLarge.copy(
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 32.sp
+                    ),
+                    color = g.textPrimary
+                )
+                Text(
+                    text = if (activeSession != null) {
+                        "Your focus shield is active and keeping distractions away."
+                    } else {
+                        "Reclaim your attention with distraction-free focus sessions."
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = g.textSecondary
+                )
+                Spacer(Modifier.height(6.dp))
+                GlassPillButton(
+                    text = if (activeSession != null) "Configure Sessions" else "Start a Session",
+                    onClick = onStartSessionClick,
+                    testTag = "today_start_session_button"
+                )
+            }
+        }
+
+        // Collapsible Active Section
+        item {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                CollapsibleSectionHeader(
+                    title = "Active",
+                    expanded = activeExpanded,
+                    onToggle = { activeExpanded = !activeExpanded }
+                )
+
+                AnimatedVisibility(visible = activeExpanded) {
+                    if (activeSession == null) {
+                        GlassCard(contentPadding = PaddingValues(22.dp)) {
+                            Text(
+                                text = "No Active Sessions",
+                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                                color = g.textPrimary
+                            )
+                            Spacer(Modifier.height(6.dp))
+                            Text(
+                                text = "Quickly focus on a task at hand and stay protected from distracting apps and websites.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = g.textSecondary
+                            )
+                            Spacer(Modifier.height(14.dp))
+                            Box(
+                                modifier = Modifier.fillMaxWidth(),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                TextButton(
+                                    onClick = onStartSessionClick,
+                                    modifier = Modifier.testTag("today_empty_start_button")
+                                ) {
+                                    Text(
+                                        text = "START A SESSION",
+                                        style = MaterialTheme.typography.labelLarge.copy(
+                                            fontWeight = FontWeight.Bold,
+                                            letterSpacing = 1.sp
+                                        ),
+                                        color = g.primaryAccent
+                                    )
+                                }
+                            }
+                        }
+                    } else {
+                        val catCount = WebsiteCategory.parseCsv(activeSession.blockedWebCategoriesCsv).size
+                        val allowedCount = uiState.allowedPackagesFor(activeSession.blocklistId).size
+                        GlassCard(
+                            accentBorderColor = if (activeSession.strictMode) g.lockedAmber else g.shieldActive,
+                            contentPadding = PaddingValues(20.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        if (activeSession.strictMode) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.Lock,
+                                                contentDescription = "Locked Mode",
+                                                tint = g.lockedAmber,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                            Spacer(Modifier.width(6.dp))
+                                        }
+                                        Text(
+                                            text = activeSession.label,
+                                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                                            color = g.textPrimary
+                                        )
+                                    }
+                                    Spacer(Modifier.height(4.dp))
+                                    val webDesc = when {
+                                        activeSession.fullInternetBrowsingBlock -> "All browsing blocked"
+                                        catCount > 0 -> "$catCount web categories blocked"
+                                        else -> "Apps allowlist only"
+                                    }
+                                    Text(
+                                        text = "$allowedCount allowed apps · $webDesc",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = g.textSecondary
+                                    )
+                                }
+
+                                Text(
+                                    text = FreedomMonitorService.formatDuration(uiState.remainingMillis),
+                                    style = MaterialTheme.typography.headlineSmall.copy(
+                                        fontFamily = JetBrainsMono,
+                                        fontWeight = FontWeight.Bold
+                                    ),
+                                    color = if (activeSession.strictMode) g.lockedAmber else g.primaryAccent
+                                )
+                            }
+
+                            Spacer(Modifier.height(14.dp))
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "${activeSession.blockedAttemptsCount} distractions blocked",
+                                    style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Medium),
+                                    color = g.textSecondary
+                                )
+
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    OutlinedButton(
+                                        onClick = { onExtendSession(15) },
+                                        shape = RoundedCornerShape(50),
+                                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
+                                        modifier = Modifier.testTag("today_extend_15_button")
+                                    ) {
+                                        Text("+15m", color = g.primaryAccent, fontWeight = FontWeight.SemiBold)
+                                    }
+                                    if (!activeSession.strictMode) {
+                                        OutlinedButton(
+                                            onClick = onStopSession,
+                                            shape = RoundedCornerShape(50),
+                                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
+                                            modifier = Modifier.testTag("today_end_session_button")
+                                        ) {
+                                            Text("End", color = g.dangerCoral, fontWeight = FontWeight.SemiBold)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Collapsible Scheduled Section
+        item {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                CollapsibleSectionHeader(
+                    title = "Scheduled",
+                    expanded = scheduledExpanded,
+                    onToggle = { scheduledExpanded = !scheduledExpanded }
+                )
+
+                AnimatedVisibility(visible = scheduledExpanded) {
+                    if (uiState.schedules.isEmpty()) {
+                        GlassCard(contentPadding = PaddingValues(22.dp)) {
+                            Text(
+                                text = "No Scheduled Sessions",
+                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                                color = g.textPrimary
+                            )
+                            Spacer(Modifier.height(6.dp))
+                            Text(
+                                text = "Schedule Later or Recurring sessions so Freedom activates automatically when you need focus most.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = g.textSecondary
+                            )
+                        }
+                    } else {
+                        val timeFmt = remember { SimpleDateFormat("EEE, h:mm a", Locale.getDefault()) }
+                        GlassCard(contentPadding = PaddingValues(vertical = 6.dp)) {
+                            uiState.schedules.forEachIndexed { idx, sched ->
+                                val profileName = uiState.blocklists.firstOrNull { it.id == sched.blocklistId }?.name ?: "Blocklist"
+                                val timingSummary = if (sched.isRecurring) {
+                                    "${ScheduleCalculator.formatDaysSummary(sched.daysMask)} · " +
+                                        "${ScheduleCalculator.formatMinuteOfDay(sched.startMinuteOfDay)}–${ScheduleCalculator.formatMinuteOfDay(sched.endMinuteOfDay)}"
+                                } else {
+                                    "One-time · ${timeFmt.format(Date(sched.oneTimeStartMs))}"
+                                }
+
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 18.dp, vertical = 12.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(
+                                        imageVector = if (sched.strictMode) Icons.Rounded.Lock else Icons.Rounded.Schedule,
+                                        contentDescription = null,
+                                        tint = if (sched.strictMode) g.lockedAmber else g.primaryAccent,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                    Spacer(Modifier.width(14.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = sched.name,
+                                            style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.SemiBold),
+                                            color = g.textPrimary
+                                        )
+                                        Text(
+                                            text = "$timingSummary · $profileName",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = g.textSecondary
+                                        )
+                                    }
+                                    FreedomSwitch(
+                                        checked = sched.enabled,
+                                        onCheckedChange = { onToggleSchedule(sched, it) }
+                                    )
+                                }
+                                if (idx < uiState.schedules.lastIndex) {
+                                    GlassDivider()
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Subtle summary footer when schedules exist
+        if (enabledSchedules.isNotEmpty()) {
+            item {
+                Spacer(Modifier.height(8.dp))
+            }
+        }
+    }
+}
+
+@Composable
+private fun CollapsibleSectionHeader(
+    title: String,
+    expanded: Boolean,
+    onToggle: () -> Unit
+) {
+    val g = FreedomGlass.colors
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(onClick = onToggle)
+            .padding(vertical = 4.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = title,
+            style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
+            color = g.textPrimary
+        )
+        Icon(
+            imageVector = if (expanded) Icons.Rounded.KeyboardArrowDown else Icons.Rounded.KeyboardArrowUp,
+            contentDescription = if (expanded) "Collapse $title" else "Expand $title",
+            tint = g.textSecondary
+        )
+    }
+}
