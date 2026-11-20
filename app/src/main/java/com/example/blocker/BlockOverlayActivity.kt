@@ -59,7 +59,7 @@ import com.example.ui.theme.FreedomGlass
 import com.example.ui.theme.FreedomTheme
 import com.example.ui.theme.GlassCard
 import com.example.ui.theme.GlassPillButton
-import com.example.ui.theme.JetBrainsMono
+import com.example.ui.theme.InterFontFamily
 import kotlinx.coroutines.delay
 
 /**
@@ -283,8 +283,9 @@ private fun BlockedShieldScreen(
                     Text(
                         text = FreedomMonitorService.formatDuration(remainingMs),
                         style = MaterialTheme.typography.titleLarge.copy(
-                            fontFamily = JetBrainsMono,
-                            fontWeight = FontWeight.Bold
+                            fontFamily = InterFontFamily,
+                            fontWeight = FontWeight.Bold,
+                            fontFeatureSettings = "tnum"
                         ),
                         color = g.primaryAccent
                     )
@@ -408,9 +409,10 @@ private fun SettingsWaitingRoomScreen(
                     Text(
                         text = String.format("%02d:%02d", mins, secs),
                         style = MaterialTheme.typography.displayMedium.copy(
-                            fontFamily = JetBrainsMono,
+                            fontFamily = InterFontFamily,
                             fontWeight = FontWeight.Bold,
-                            fontSize = 48.sp
+                            fontSize = 48.sp,
+                            fontFeatureSettings = "tnum"
                         ),
                         color = if (unlockedReady) g.shieldActive else g.lockedAmber
                     )

@@ -56,6 +56,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import android.util.LruCache
+import androidx.compose.runtime.produceState
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
@@ -77,6 +80,16 @@ import com.example.ui.theme.GlassDivider
 import com.example.ui.theme.GlassGroupedRow
 import com.example.ui.theme.GlassPillButton
 import com.example.ui.theme.GlassSegmentedControl
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+
+private object AppIconCache {
+    private val cache = LruCache<String, ImageBitmap>(180)
+    fun get(pkg: String): ImageBitmap? = cache.get(pkg)
+    fun put(pkg: String, bmp: ImageBitmap) {
+        cache.put(pkg, bmp)
+    }
+}
 
 private sealed class BlocklistSubScreen(val depth: Int) {
     data object List : BlocklistSubScreen(0)
@@ -144,12 +157,12 @@ fun BlocklistsScreen(
         transitionSpec = {
             val deeper = targetState.depth >= initialState.depth
             (slideInHorizontally(
-                animationSpec = FreedomMotion.FluidIntOffsetSpring,
-                initialOffsetX = { if (deeper) it / 5 else -it / 6 }
-            ) + fadeIn(tween(220))) togetherWith (slideOutHorizontally(
-                animationSpec = FreedomMotion.FluidIntOffsetSpring,
-                targetOffsetX = { if (deeper) -it / 6 else it / 5 }
-            ) + fadeOut(tween(160)))
+                animationSpec = FreedomMotion.SlideOffsetSpec,
+                initialOffsetX = { if (deeper) it / 8 else -it / 10 }
+            ) + fadeIn(FreedomMotion.FastFadeIn)) togetherWith (slideOutHorizontally(
+                animationSpec = FreedomMotion.SlideOffsetSpec,
+                targetOffsetX = { if (deeper) -it / 10 else it / 8 }
+            ) + fadeOut(FreedomMotion.FastFadeOut))
         },
         label = "blocklists_subscreen"
     ) { active ->
@@ -276,7 +289,7 @@ private fun BlocklistListView(
             contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 16.dp, bottom = 104.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            item {
+            item(key = "blocklists_title") {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -285,7 +298,7 @@ private fun BlocklistListView(
                 ) {
                     Text(
                         text = "Blocklists",
-                        style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
+                        style = MaterialTheme.typography.titleLarge,
                         color = g.textPrimary
                     )
                 }
@@ -294,7 +307,9 @@ private fun BlocklistListView(
             items(uiState.blocklists, key = { it.id }) { profile ->
                 var menuExpanded by remember { mutableStateOf(false) }
                 val allowedCount = uiState.allowedPackagesFor(profile.id).size
-                val catCount = WebsiteCategory.parseCsv(profile.blockedWebCategoriesCsv).size
+                val catCount = remember(profile.blockedWebCategoriesCsv) {
+                    WebsiteCategory.parseCsv(profile.blockedWebCategoriesCsv).size
+                }
 
                 GlassCard(
                     contentPadding = PaddingValues(horizontal = 18.dp, vertical = 16.dp),
@@ -359,7 +374,7 @@ private fun BlocklistListView(
             }
 
             // Always-accessible Website Allowlist (URL Exceptions) card
-            item {
+            item(key = "blocklists_exceptions") {
                 Spacer(Modifier.height(6.dp))
                 Text(
                     text = "Website Exceptions",
@@ -674,12 +689,23 @@ private fun AllowedAppsPickerView(
         ) {
             items(filtered, key = { it.packageName }) { app ->
                 val isChecked = app.isAlwaysExempt || app.packageName in selectedApps
-                val iconBitmap = remember(app.packageName) {
-                    runCatching {
-                        context.packageManager.getApplicationIcon(app.packageName)
-                            .toBitmap(72, 72)
-                            .asImageBitmap()
-                    }.getOrNull()
+                val iconBitmap by produceState(
+                    initialValue = AppIconCache.get(app.packageName),
+                    key1 = app.packageName
+                ) {
+                    if (value == null) {
+                        val loaded = withContext(Dispatchers.IO) {
+                            runCatching {
+                                context.packageManager.getApplicationIcon(app.packageName)
+                                    .toBitmap(72, 72)
+                                    .asImageBitmap()
+                            }.getOrNull()
+                        }
+                        if (loaded != null) {
+                            AppIconCache.put(app.packageName, loaded)
+                            value = loaded
+                        }
+                    }
                 }
                 GlassCard(
                     cornerRadius = 16.dp,
@@ -692,9 +718,10 @@ private fun AllowedAppsPickerView(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        if (iconBitmap != null) {
+                        val bmp = iconBitmap
+                        if (bmp != null) {
                             Image(
-                                bitmap = iconBitmap,
+                                bitmap = bmp,
                                 contentDescription = null,
                                 modifier = Modifier
                                     .size(36.dp)

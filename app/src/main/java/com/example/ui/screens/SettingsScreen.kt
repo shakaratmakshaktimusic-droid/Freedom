@@ -118,12 +118,12 @@ fun SettingsScreen(
         transitionSpec = {
             val enteringChild = targetState != SettingsSubScreen.ROOT
             (slideInHorizontally(
-                animationSpec = FreedomMotion.FluidIntOffsetSpring,
-                initialOffsetX = { if (enteringChild) it / 5 else -it / 6 }
-            ) + fadeIn(tween(220))) togetherWith (slideOutHorizontally(
-                animationSpec = FreedomMotion.FluidIntOffsetSpring,
-                targetOffsetX = { if (enteringChild) -it / 6 else it / 5 }
-            ) + fadeOut(tween(160)))
+                animationSpec = FreedomMotion.SlideOffsetSpec,
+                initialOffsetX = { if (enteringChild) it / 8 else -it / 10 }
+            ) + fadeIn(FreedomMotion.FastFadeIn)) togetherWith (slideOutHorizontally(
+                animationSpec = FreedomMotion.SlideOffsetSpec,
+                targetOffsetX = { if (enteringChild) -it / 10 else it / 8 }
+            ) + fadeOut(FreedomMotion.FastFadeOut))
         },
         label = "settings_subscreen"
     ) { active ->
@@ -195,20 +195,20 @@ private fun SettingsRootView(
         contentPadding = PaddingValues(horizontal = 20.dp, vertical = 16.dp),
         verticalArrangement = Arrangement.spacedBy(18.dp)
     ) {
-        item {
+        item(key = "settings_title") {
             Box(
                 modifier = Modifier.fillMaxWidth(),
                 contentAlignment = Alignment.Center
             ) {
                 Text(
                     text = "Settings",
-                    style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
+                    style = MaterialTheme.typography.titleLarge,
                     color = g.textPrimary
                 )
             }
         }
 
-        item {
+        item(key = "settings_configure") {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(
                     text = "Configure Freedom",
@@ -247,7 +247,7 @@ private fun SettingsRootView(
         }
 
         // Theme selector card (Forest Dark / Clean Light / System)
-        item {
+        item(key = "settings_appearance") {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(
                     text = "Appearance",
@@ -326,8 +326,8 @@ private fun BlockingSettingsView(
             contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(20.dp)
         ) {
-            // Locked Mode section (matching Screenshot 6!)
-            item {
+            // Locked Mode section
+            item(key = "blocking_locked_mode") {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text(
                         text = "Locked Mode",
@@ -365,8 +365,8 @@ private fun BlockingSettingsView(
                 }
             }
 
-            // Advanced section: DND & Disable Notifications (matching Screenshot 6!)
-            item {
+            // Advanced section: DND & Disable Notifications
+            item(key = "blocking_advanced") {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text(
                         text = "Advanced",
@@ -458,7 +458,7 @@ private fun BlockingSettingsView(
             }
 
             // Blocking Permissions Checklist (Zero VPN!)
-            item {
+            item(key = "blocking_permissions") {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text(
                         text = "Blocking Permissions",

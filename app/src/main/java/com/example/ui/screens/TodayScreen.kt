@@ -2,12 +2,13 @@ package com.example.ui.screens
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -26,7 +27,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
-import androidx.compose.material.icons.rounded.KeyboardArrowUp
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.material.icons.rounded.Shield
@@ -44,42 +44,47 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.blocker.FreedomMonitorService
+import com.example.data.local.ScheduleEntity
 import com.example.domain.ScheduleCalculator
 import com.example.domain.WebsiteCategory
 import com.example.ui.FreedomUiState
-import androidx.compose.ui.graphics.graphicsLayer
 import com.example.ui.theme.FreedomGlass
 import com.example.ui.theme.FreedomMotion
 import com.example.ui.theme.FreedomSwitch
 import com.example.ui.theme.GlassCard
 import com.example.ui.theme.GlassDivider
 import com.example.ui.theme.GlassPillButton
-import com.example.ui.theme.JetBrainsMono
+import com.example.ui.theme.InterFontFamily
 import com.example.ui.theme.rememberFreedomHaptics
+import kotlinx.coroutines.flow.StateFlow
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 
 /**
- * Clean Today dashboard inspired by the reference screenshot:
- *  - Calm time-of-day greeting + shield readiness pill (no fake crowd counters or upsells)
+ * Clean Today dashboard:
+ *  - Calm time-of-day greeting + shield readiness pill
  *  - Primary START A SESSION CTA pill
- *  - Collapsible Active Sessions glass card
+ *  - Collapsible Active Sessions glass card (isolated 1-second timer recomposition scope)
  *  - Collapsible Scheduled Sessions glass card (Later & Recurring)
  */
 @Composable
 fun TodayScreen(
     uiState: FreedomUiState,
+    remainingMillisFlow: StateFlow<Long>,
     onStartSessionClick: () -> Unit,
     onStopSession: () -> Unit,
     onExtendSession: (Int) -> Unit,
-    onToggleSchedule: (com.example.data.local.ScheduleEntity, Boolean) -> Unit,
+    onToggleSchedule: (ScheduleEntity, Boolean) -> Unit,
     onOpenSettingsPermissions: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -96,10 +101,12 @@ fun TodayScreen(
         }
     }
 
-    val activeSession = uiState.activeSession?.takeIf { it.active && uiState.remainingMillis > 0L }
-    val enabledSchedules = uiState.schedules.filter { it.enabled }
+    val activeSession = uiState.activeSession?.takeIf { it.active }
     val perms = uiState.permissions
     val isReady = perms?.isCoreBlockingReady == true
+    val blocklistNamesById = remember(uiState.blocklists) {
+        uiState.blocklists.associate { it.id to it.name }
+    }
 
     LazyColumn(
         modifier = modifier.fillMaxSize(),
@@ -107,7 +114,7 @@ fun TodayScreen(
         verticalArrangement = Arrangement.spacedBy(20.dp)
     ) {
         // Header with brand mark + shield readiness indicator
-        item {
+        item(key = "today_header") {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -125,13 +132,13 @@ fun TodayScreen(
                             imageVector = Icons.Rounded.Shield,
                             contentDescription = "Freedom",
                             tint = g.primaryAccent,
-                            modifier = Modifier.size(22.dp)
+                            modifier = Modifier.size(21.dp)
                         )
                     }
                     Spacer(Modifier.width(12.dp))
                     Text(
                         text = "Freedom",
-                        style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
+                        style = MaterialTheme.typography.titleLarge,
                         color = g.textPrimary
                     )
                 }
@@ -141,6 +148,7 @@ fun TodayScreen(
                     modifier = Modifier
                         .clip(RoundedCornerShape(50))
                         .background(g.glassSurface)
+                        .border(1.dp, g.glassBorder, RoundedCornerShape(50))
                         .clickable { onOpenSettingsPermissions() }
                         .padding(horizontal = 12.dp, vertical = 8.dp)
                         .testTag("today_shield_status_pill"),
@@ -150,7 +158,7 @@ fun TodayScreen(
                         imageVector = if (isReady) Icons.Rounded.Shield else Icons.Rounded.WarningAmber,
                         contentDescription = null,
                         tint = if (isReady) g.shieldActive else g.lockedAmber,
-                        modifier = Modifier.size(16.dp)
+                        modifier = Modifier.size(15.dp)
                     )
                     Spacer(Modifier.width(6.dp))
                     Text(
@@ -163,14 +171,11 @@ fun TodayScreen(
         }
 
         // Greeting + Primary CTA
-        item {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        item(key = "today_greeting") {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
                     text = greeting,
-                    style = MaterialTheme.typography.headlineLarge.copy(
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 32.sp
-                    ),
+                    style = MaterialTheme.typography.headlineLarge,
                     color = g.textPrimary
                 )
                 Text(
@@ -192,7 +197,7 @@ fun TodayScreen(
         }
 
         // Collapsible Active Section
-        item {
+        item(key = "today_active_section") {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 CollapsibleSectionHeader(
                     title = "Active",
@@ -202,11 +207,11 @@ fun TodayScreen(
 
                 AnimatedVisibility(
                     visible = activeExpanded,
-                    enter = expandVertically(FreedomMotion.FluidSizeSpring) + fadeIn(tween(200)),
-                    exit = shrinkVertically(FreedomMotion.FluidSizeSpring) + fadeOut(tween(150))
+                    enter = expandVertically(FreedomMotion.ExpandSizeSpec) + fadeIn(FreedomMotion.FastFadeIn),
+                    exit = shrinkVertically(FreedomMotion.ExpandSizeSpec) + fadeOut(FreedomMotion.FastFadeOut)
                 ) {
                     if (activeSession == null) {
-                        GlassCard(contentPadding = PaddingValues(22.dp)) {
+                        GlassCard(contentPadding = PaddingValues(20.dp)) {
                             Text(
                                 text = "No Active Sessions",
                                 style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
@@ -218,7 +223,7 @@ fun TodayScreen(
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = g.textSecondary
                             )
-                            Spacer(Modifier.height(14.dp))
+                            Spacer(Modifier.height(12.dp))
                             Box(
                                 modifier = Modifier.fillMaxWidth(),
                                 contentAlignment = Alignment.Center
@@ -231,7 +236,7 @@ fun TodayScreen(
                                         text = "START A SESSION",
                                         style = MaterialTheme.typography.labelLarge.copy(
                                             fontWeight = FontWeight.Bold,
-                                            letterSpacing = 1.sp
+                                            letterSpacing = 0.8.sp
                                         ),
                                         color = g.primaryAccent
                                     )
@@ -239,7 +244,9 @@ fun TodayScreen(
                             }
                         }
                     } else {
-                        val catCount = WebsiteCategory.parseCsv(activeSession.blockedWebCategoriesCsv).size
+                        val catCount = remember(activeSession.blockedWebCategoriesCsv) {
+                            WebsiteCategory.parseCsv(activeSession.blockedWebCategoriesCsv).size
+                        }
                         val allowedCount = uiState.allowedPackagesFor(activeSession.blocklistId).size
                         GlassCard(
                             accentBorderColor = if (activeSession.strictMode) g.lockedAmber else g.shieldActive,
@@ -280,12 +287,10 @@ fun TodayScreen(
                                     )
                                 }
 
-                                Text(
-                                    text = FreedomMonitorService.formatDuration(uiState.remainingMillis),
-                                    style = MaterialTheme.typography.headlineSmall.copy(
-                                        fontFamily = JetBrainsMono,
-                                        fontWeight = FontWeight.Bold
-                                    ),
+                                Spacer(Modifier.width(12.dp))
+
+                                ActiveSessionCountdown(
+                                    remainingMillisFlow = remainingMillisFlow,
                                     color = if (activeSession.strictMode) g.lockedAmber else g.primaryAccent
                                 )
                             }
@@ -307,19 +312,29 @@ fun TodayScreen(
                                     OutlinedButton(
                                         onClick = { onExtendSession(15) },
                                         shape = RoundedCornerShape(50),
+                                        border = BorderStroke(1.dp, g.primaryAccent.copy(alpha = 0.55f)),
                                         contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
                                         modifier = Modifier.testTag("today_extend_15_button")
                                     ) {
-                                        Text("+15m", color = g.primaryAccent, fontWeight = FontWeight.SemiBold)
+                                        Text(
+                                            text = "+15m",
+                                            style = MaterialTheme.typography.labelLarge,
+                                            color = g.primaryAccent
+                                        )
                                     }
                                     if (!activeSession.strictMode) {
                                         OutlinedButton(
                                             onClick = onStopSession,
                                             shape = RoundedCornerShape(50),
+                                            border = BorderStroke(1.dp, g.dangerCoral.copy(alpha = 0.55f)),
                                             contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
                                             modifier = Modifier.testTag("today_end_session_button")
                                         ) {
-                                            Text("End", color = g.dangerCoral, fontWeight = FontWeight.SemiBold)
+                                            Text(
+                                                text = "End",
+                                                style = MaterialTheme.typography.labelLarge,
+                                                color = g.dangerCoral
+                                            )
                                         }
                                     }
                                 }
@@ -331,7 +346,7 @@ fun TodayScreen(
         }
 
         // Collapsible Scheduled Section
-        item {
+        item(key = "today_scheduled_section") {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 CollapsibleSectionHeader(
                     title = "Scheduled",
@@ -341,11 +356,11 @@ fun TodayScreen(
 
                 AnimatedVisibility(
                     visible = scheduledExpanded,
-                    enter = expandVertically(FreedomMotion.FluidSizeSpring) + fadeIn(tween(200)),
-                    exit = shrinkVertically(FreedomMotion.FluidSizeSpring) + fadeOut(tween(150))
+                    enter = expandVertically(FreedomMotion.ExpandSizeSpec) + fadeIn(FreedomMotion.FastFadeIn),
+                    exit = shrinkVertically(FreedomMotion.ExpandSizeSpec) + fadeOut(FreedomMotion.FastFadeOut)
                 ) {
                     if (uiState.schedules.isEmpty()) {
-                        GlassCard(contentPadding = PaddingValues(22.dp)) {
+                        GlassCard(contentPadding = PaddingValues(20.dp)) {
                             Text(
                                 text = "No Scheduled Sessions",
                                 style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
@@ -360,9 +375,9 @@ fun TodayScreen(
                         }
                     } else {
                         val timeFmt = remember { SimpleDateFormat("EEE, h:mm a", Locale.getDefault()) }
-                        GlassCard(contentPadding = PaddingValues(vertical = 6.dp)) {
+                        GlassCard(contentPadding = PaddingValues(vertical = 4.dp)) {
                             uiState.schedules.forEachIndexed { idx, sched ->
-                                val profileName = uiState.blocklists.firstOrNull { it.id == sched.blocklistId }?.name ?: "Blocklist"
+                                val profileName = blocklistNamesById[sched.blocklistId] ?: "Blocklist"
                                 val timingSummary = if (sched.isRecurring) {
                                     "${ScheduleCalculator.formatDaysSummary(sched.daysMask)} · " +
                                         "${ScheduleCalculator.formatMinuteOfDay(sched.startMinuteOfDay)}–${ScheduleCalculator.formatMinuteOfDay(sched.endMinuteOfDay)}"
@@ -410,13 +425,31 @@ fun TodayScreen(
             }
         }
 
-        // Subtle summary footer when schedules exist
-        if (enabledSchedules.isNotEmpty()) {
-            item {
-                Spacer(Modifier.height(8.dp))
-            }
+        item(key = "today_bottom_spacer") {
+            Spacer(Modifier.height(8.dp))
         }
     }
+}
+
+/**
+ * Isolated composable collecting the 1-second timer so countdown ticks NEVER
+ * recompose sibling cards, navigation chrome, or other screens.
+ */
+@Composable
+private fun ActiveSessionCountdown(
+    remainingMillisFlow: StateFlow<Long>,
+    color: Color
+) {
+    val remainingMillis by remainingMillisFlow.collectAsStateWithLifecycle()
+    Text(
+        text = FreedomMonitorService.formatDuration(remainingMillis),
+        style = MaterialTheme.typography.headlineSmall.copy(
+            fontFamily = InterFontFamily,
+            fontWeight = FontWeight.Bold,
+            fontFeatureSettings = "tnum"
+        ),
+        color = color
+    )
 }
 
 @Composable
@@ -429,13 +462,13 @@ private fun CollapsibleSectionHeader(
     val haptics = rememberFreedomHaptics()
     val chevronRotation by animateFloatAsState(
         targetValue = if (expanded) 0f else -180f,
-        animationSpec = FreedomMotion.SnappyFloatSpring,
+        animationSpec = FreedomMotion.CrispFloatSpec,
         label = "section_chevron"
     )
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
+            .clip(RoundedCornerShape(12.dp))
             .clickable {
                 haptics.tap()
                 onToggle()
@@ -446,7 +479,7 @@ private fun CollapsibleSectionHeader(
     ) {
         Text(
             text = title,
-            style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
+            style = MaterialTheme.typography.titleLarge,
             color = g.textPrimary
         )
         Icon(

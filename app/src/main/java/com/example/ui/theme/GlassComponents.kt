@@ -1,16 +1,13 @@
 package com.example.ui.theme
 
-import android.os.Build
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.animateContentSize
-import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -24,11 +21,9 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
@@ -46,11 +41,14 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -65,9 +63,12 @@ enum class BackdropMood {
     SHIELD
 }
 
+private val PillShape = RoundedCornerShape(50)
+
 /**
- * ColorOS-inspired serene forest-green dark / botanical porcelain light canvas
- * with smoothly breathing ambient radial glow washes.
+ * High-performance Forest Dark / Botanical Light glassmorphism backdrop.
+ * Uses a single drawBehind radial-gradient pass instead of expensive RenderEffect
+ * Modifier.blur(96.dp) layers, keeping 60 FPS locked during scrolling & tab switches.
  */
 @Composable
 fun ForestGlassBackdrop(
@@ -84,67 +85,63 @@ fun ForestGlassBackdrop(
     }
     val glowColor by animateColorAsState(
         targetValue = targetGlow,
-        animationSpec = tween(durationMillis = 650),
+        animationSpec = tween(durationMillis = 420),
         label = "backdrop_glow"
     )
+
+    val bgBrush = remember(g.bgTop, g.bgBottom) {
+        Brush.verticalGradient(colors = listOf(g.bgTop, g.bgBottom))
+    }
 
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(
-                Brush.verticalGradient(
-                    colors = listOf(g.bgTop, g.bgBottom)
-                )
-            )
-    ) {
-        val orbModifier = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            Modifier.blur(96.dp)
-        } else {
-            Modifier
-        }
-        Box(
-            modifier = Modifier
-                .align(Alignment.TopEnd)
-                .size(280.dp)
-                .then(orbModifier)
-                .background(
-                    Brush.radialGradient(
+            .background(bgBrush)
+            .drawBehind {
+                val topOrbRadius = size.minDimension * 0.85f
+                val topAlpha = if (g.isDark) 0.24f else 0.30f
+                drawCircle(
+                    brush = Brush.radialGradient(
                         colors = listOf(
-                            glowColor.copy(alpha = if (g.isDark) 0.26f else 0.34f),
+                            glowColor.copy(alpha = topAlpha),
+                            glowColor.copy(alpha = topAlpha * 0.35f),
                             Color.Transparent
-                        )
+                        ),
+                        center = Offset(size.width * 0.92f, size.height * 0.06f),
+                        radius = topOrbRadius
                     ),
-                    shape = CircleShape
+                    radius = topOrbRadius,
+                    center = Offset(size.width * 0.92f, size.height * 0.06f)
                 )
-        )
-        Box(
-            modifier = Modifier
-                .align(Alignment.BottomStart)
-                .size(240.dp)
-                .then(orbModifier)
-                .background(
-                    Brush.radialGradient(
-                        colors = listOf(
-                            g.primaryAccent.copy(alpha = if (g.isDark) 0.13f else 0.18f),
-                            Color.Transparent
-                        )
-                    ),
-                    shape = CircleShape
-                )
-        )
 
+                val bottomOrbRadius = size.minDimension * 0.72f
+                val bottomAlpha = if (g.isDark) 0.12f else 0.16f
+                drawCircle(
+                    brush = Brush.radialGradient(
+                        colors = listOf(
+                            g.primaryAccent.copy(alpha = bottomAlpha),
+                            Color.Transparent
+                        ),
+                        center = Offset(size.width * 0.08f, size.height * 0.92f),
+                        radius = bottomOrbRadius
+                    ),
+                    radius = bottomOrbRadius,
+                    center = Offset(size.width * 0.08f, size.height * 0.92f)
+                )
+            }
+    ) {
         content()
     }
 }
 
 /**
- * ColorOS Luminous Glass card with generous continuous corners (24.dp),
- * top-lit hairline specular rim, smooth spring content resizing, and tactile press bounce.
+ * Refined glass card with consistent 22.dp corners, cached specular border stroke,
+ * crisp light/dark contrast, and lightweight GPU press feedback when clickable.
  */
 @Composable
 fun GlassCard(
     modifier: Modifier = Modifier,
-    cornerRadius: Dp = 24.dp,
+    cornerRadius: Dp = 22.dp,
     elevated: Boolean = false,
     accentBorderColor: Color? = null,
     contentPadding: PaddingValues = PaddingValues(18.dp),
@@ -153,21 +150,29 @@ fun GlassCard(
     content: @Composable ColumnScope.() -> Unit
 ) {
     val g = FreedomGlass.colors
-    val haptics = rememberFreedomHaptics()
-    val shape = RoundedCornerShape(cornerRadius)
+    val shape = remember(cornerRadius) { RoundedCornerShape(cornerRadius) }
     val bgColor = if (elevated) g.glassSurfaceElevated else g.glassSurface
-    val interactionSource = remember { MutableInteractionSource() }
-    val borderBrush = Brush.verticalGradient(
-        colors = listOf(
-            accentBorderColor?.copy(alpha = 0.58f)
-                ?: if (g.isDark) Color.White.copy(alpha = 0.17f) else Color.White.copy(alpha = 0.94f),
-            accentBorderColor?.copy(alpha = 0.22f) ?: g.glassBorder
+    val borderStroke = remember(g.isDark, g.glassBorder, accentBorderColor) {
+        BorderStroke(
+            width = 1.dp,
+            brush = Brush.verticalGradient(
+                colors = listOf(
+                    accentBorderColor?.copy(alpha = 0.62f)
+                        ?: if (g.isDark) Color.White.copy(alpha = 0.16f) else Color.White.copy(alpha = 0.96f),
+                    accentBorderColor?.copy(alpha = 0.24f) ?: g.glassBorder
+                )
+            )
         )
-    )
+    }
 
-    val clickableModifier = if (onClick != null) {
-        Modifier
-            .colorOsPressScale(interactionSource, pressedScale = 0.975f)
+    val finalModifier = if (onClick != null) {
+        val haptics = rememberFreedomHaptics()
+        val interactionSource = remember { MutableInteractionSource() }
+        modifier
+            .fillMaxWidth()
+            .colorOsPressScale(interactionSource, pressedScale = 0.985f)
+            .clip(shape)
+            .border(borderStroke, shape)
             .clickable(
                 interactionSource = interactionSource,
                 indication = androidx.compose.material3.ripple(),
@@ -177,27 +182,25 @@ fun GlassCard(
                 }
             )
     } else {
-        Modifier
+        modifier
+            .fillMaxWidth()
+            .clip(shape)
+            .border(borderStroke, shape)
     }
 
     Surface(
-        modifier = modifier
-            .fillMaxWidth()
-            .let { if (animateSize) it.animateContentSize(animationSpec = FreedomMotion.FluidSizeSpring) else it }
-            .clip(shape)
-            .border(BorderStroke(1.dp, borderBrush), shape)
-            .then(clickableModifier),
+        modifier = finalModifier,
         shape = shape,
         color = bgColor,
         tonalElevation = 0.dp,
-        shadowElevation = if (g.isDark) 0.dp else 5.dp
+        shadowElevation = if (g.isDark) 0.dp else 3.dp
     ) {
         Column(modifier = Modifier.padding(contentPadding), content = content)
     }
 }
 
 /**
- * Signature full-width rounded pill CTA with ColorOS spring press-scale & subtle haptic feedback.
+ * Signature full-width rounded pill CTA with crisp Inter 700 typography and GPU press feedback.
  */
 @Composable
 fun GlassPillButton(
@@ -221,7 +224,7 @@ fun GlassPillButton(
         },
         enabled = enabled,
         interactionSource = interactionSource,
-        shape = RoundedCornerShape(50),
+        shape = PillShape,
         colors = ButtonDefaults.buttonColors(
             containerColor = bg,
             contentColor = fg,
@@ -231,15 +234,15 @@ fun GlassPillButton(
         contentPadding = PaddingValues(horizontal = 24.dp, vertical = 14.dp),
         modifier = modifier
             .fillMaxWidth()
-            .heightIn(min = 54.dp)
-            .colorOsPressScale(interactionSource, pressedScale = 0.965f)
+            .heightIn(min = 52.dp)
+            .colorOsPressScale(interactionSource, pressedScale = 0.975f)
             .let { if (testTag != null) it.testTag(testTag) else it }
     ) {
         Text(
             text = text.uppercase(),
             style = MaterialTheme.typography.labelLarge.copy(
                 fontWeight = FontWeight.Bold,
-                letterSpacing = 1.1.sp
+                letterSpacing = 0.9.sp
             ),
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
@@ -248,8 +251,8 @@ fun GlassPillButton(
 }
 
 /**
- * ColorOS fluid sliding-capsule segmented pill switcher (NOW | LATER | RECURRING, LENGTH | END TIME).
- * The active pill glides smoothly across options using spring physics instead of snapping.
+ * 60 FPS GPU-translated sliding-capsule segmented pill switcher.
+ * Uses graphicsLayer translationX instead of layout-triggering Modifier.offset.
  */
 @Composable
 fun GlassSegmentedControl(
@@ -262,36 +265,38 @@ fun GlassSegmentedControl(
     if (options.isEmpty()) return
     val g = FreedomGlass.colors
     val haptics = rememberFreedomHaptics()
-    val outerShape = RoundedCornerShape(50)
     val safeIndex = selectedIndex.coerceIn(0, options.lastIndex)
+    val density = LocalDensity.current
 
     BoxWithConstraints(
         modifier = modifier
             .fillMaxWidth()
-            .height(50.dp)
-            .clip(outerShape)
+            .height(48.dp)
+            .clip(PillShape)
             .background(g.glassSurface)
-            .border(1.dp, g.glassBorder, outerShape)
+            .border(1.dp, g.glassBorder, PillShape)
             .padding(4.dp)
     ) {
         val segmentWidth = maxWidth / options.size
-        val thumbOffset by animateDpAsState(
-            targetValue = segmentWidth * safeIndex,
-            animationSpec = FreedomMotion.SnappyDpSpring,
-            label = "segment_thumb_offset"
+        val segmentWidthPx = with(density) { segmentWidth.toPx() }
+        val animatedIndex by animateFloatAsState(
+            targetValue = safeIndex.toFloat(),
+            animationSpec = FreedomMotion.CrispFloatSpec,
+            label = "segment_thumb_index"
         )
 
-        // Sliding active capsule
+        // GPU-only sliding active capsule (zero relayout passes during glide)
         Box(
             modifier = Modifier
-                .offset(x = thumbOffset)
                 .width(segmentWidth)
                 .fillMaxHeight()
-                .clip(RoundedCornerShape(50))
+                .graphicsLayer {
+                    translationX = animatedIndex * segmentWidthPx
+                }
+                .clip(PillShape)
                 .background(g.primaryAccent)
         )
 
-        // Interactive labels layered cleanly over the sliding capsule
         Row(
             modifier = Modifier.fillMaxSize(),
             verticalAlignment = Alignment.CenterVertically
@@ -300,16 +305,17 @@ fun GlassSegmentedControl(
                 val selected = index == safeIndex
                 val labelColor by animateColorAsState(
                     targetValue = if (selected) g.onPrimaryAccent else g.textSecondary,
-                    animationSpec = tween(durationMillis = 180),
+                    animationSpec = tween(durationMillis = 150),
                     label = "segment_label_color"
                 )
+                val interactionSource = remember { MutableInteractionSource() }
                 Box(
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxHeight()
-                        .clip(RoundedCornerShape(50))
+                        .clip(PillShape)
                         .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
+                            interactionSource = interactionSource,
                             indication = null
                         ) {
                             if (index != safeIndex) {
@@ -323,8 +329,8 @@ fun GlassSegmentedControl(
                     Text(
                         text = label.uppercase(),
                         style = MaterialTheme.typography.labelMedium.copy(
-                            fontWeight = FontWeight.Bold,
-                            letterSpacing = 0.8.sp
+                            fontWeight = if (selected) FontWeight.Bold else FontWeight.SemiBold,
+                            letterSpacing = 0.6.sp
                         ),
                         color = labelColor,
                         maxLines = 1,
@@ -337,7 +343,7 @@ fun GlassSegmentedControl(
 }
 
 /**
- * Clean ColorOS grouped navigation row inside a GlassCard.
+ * Clean grouped navigation row inside a GlassCard with balanced Inter 600/400 hierarchy.
  */
 @Composable
 fun GlassGroupedRow(
@@ -351,27 +357,30 @@ fun GlassGroupedRow(
     onClick: (() -> Unit)? = null
 ) {
     val g = FreedomGlass.colors
-    val haptics = rememberFreedomHaptics()
-    val interactionSource = remember { MutableInteractionSource() }
-    Row(
-        modifier = modifier
+    val rowModifier = if (onClick != null) {
+        val haptics = rememberFreedomHaptics()
+        val interactionSource = remember { MutableInteractionSource() }
+        modifier
             .fillMaxWidth()
-            .heightIn(min = 58.dp)
-            .let {
-                if (onClick != null) {
-                    it
-                        .colorOsPressScale(interactionSource, pressedScale = 0.985f)
-                        .clickable(
-                            interactionSource = interactionSource,
-                            indication = androidx.compose.material3.ripple(),
-                            onClick = {
-                                haptics.tap()
-                                onClick()
-                            }
-                        )
-                } else it
-            }
-            .padding(horizontal = 18.dp, vertical = 14.dp),
+            .heightIn(min = 56.dp)
+            .clickable(
+                interactionSource = interactionSource,
+                indication = androidx.compose.material3.ripple(),
+                onClick = {
+                    haptics.tap()
+                    onClick()
+                }
+            )
+            .padding(horizontal = 18.dp, vertical = 14.dp)
+    } else {
+        modifier
+            .fillMaxWidth()
+            .heightIn(min = 56.dp)
+            .padding(horizontal = 18.dp, vertical = 14.dp)
+    }
+
+    Row(
+        modifier = rowModifier,
         verticalAlignment = Alignment.CenterVertically
     ) {
         if (leadingIcon != null) {
@@ -379,7 +388,7 @@ fun GlassGroupedRow(
                 imageVector = leadingIcon,
                 contentDescription = null,
                 tint = g.textPrimary.copy(alpha = 0.9f),
-                modifier = Modifier.size(22.dp)
+                modifier = Modifier.size(21.dp)
             )
             Spacer(Modifier.width(14.dp))
         }
@@ -404,7 +413,7 @@ fun GlassGroupedRow(
             Spacer(Modifier.width(8.dp))
             Text(
                 text = trailingText,
-                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
+                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
                 color = trailingTint ?: g.primaryAccent,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
@@ -415,7 +424,7 @@ fun GlassGroupedRow(
             Icon(
                 imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
                 contentDescription = null,
-                tint = g.textSecondary,
+                tint = g.textMuted,
                 modifier = Modifier.size(20.dp)
             )
         }

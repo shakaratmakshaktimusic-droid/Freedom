@@ -2,6 +2,7 @@ package com.example.ui
 
 import android.app.Application
 import android.os.SystemClock
+import androidx.compose.runtime.Immutable
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.FreedomApplication
@@ -34,11 +35,12 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
+@Immutable
 data class FreedomUiState(
     val activeSession: FocusSessionEntity? = null,
-    val remainingMillis: Long = 0L,
     val blocklists: List<BlocklistProfileEntity> = emptyList(),
     val allowedAppsByBlocklist: Map<Long, List<BlocklistAllowedAppEntity>> = emptyMap(),
+    val allowedPackagesByBlocklist: Map<Long, Set<String>> = emptyMap(),
     val allowedWebsites: List<AllowedWebsiteEntity> = emptyList(),
     val customBlockedWebsites: List<CustomBlockedWebsiteEntity> = emptyList(),
     val autoLearnedCount: Int = 0,
@@ -57,11 +59,14 @@ data class FreedomUiState(
     val autoDetectUnknownSites: Boolean = true,
     val filterUpdateFrequency: FilterUpdateFrequency = FilterUpdateFrequency.DAILY
 ) {
+    val isSessionActive: Boolean
+        get() = activeSession?.active == true
+
     val isStrictModeActive: Boolean
-        get() = activeSession?.active == true && activeSession.strictMode && remainingMillis > 0L
+        get() = activeSession?.active == true && activeSession.strictMode
 
     fun allowedPackagesFor(blocklistId: Long): Set<String> =
-        allowedAppsByBlocklist[blocklistId]?.map { it.packageName }?.toSet() ?: emptySet()
+        allowedPackagesByBlocklist[blocklistId] ?: emptySet()
 }
 
 class FreedomViewModel(application: Application) : AndroidViewModel(application) {
@@ -73,7 +78,13 @@ class FreedomViewModel(application: Application) : AndroidViewModel(application)
     private val _installedApps = MutableStateFlow<List<InstalledAppInfo>>(emptyList())
     private val _isLoadingApps = MutableStateFlow(true)
     private val _permissions = MutableStateFlow(permissionChecker.check())
-    private val _ticker = MutableStateFlow(0L)
+
+    /**
+     * Isolated 1-second countdown flow so live timer ticks ONLY recompose the
+     * active-session countdown label instead of the entire UI tree.
+     */
+    private val _remainingMillis = MutableStateFlow(0L)
+    val remainingMillis: StateFlow<Long> = _remainingMillis.asStateFlow()
 
     private val _themeMode = MutableStateFlow(repository.getThemeMode())
     private val _lockedModeDefault = MutableStateFlow(repository.isLockedModeDefault())
@@ -91,7 +102,8 @@ class FreedomViewModel(application: Application) : AndroidViewModel(application)
     private data class CoreDbBundle(
         val active: FocusSessionEntity?,
         val blocklists: List<BlocklistProfileEntity>,
-        val allAllowedApps: List<BlocklistAllowedAppEntity>,
+        val allowedAppsByBlocklist: Map<Long, List<BlocklistAllowedAppEntity>>,
+        val allowedPackagesByBlocklist: Map<Long, Set<String>>,
         val allowedWebsites: List<AllowedWebsiteEntity>,
         val customBlockedWebsites: List<CustomBlockedWebsiteEntity>
     )
@@ -121,7 +133,16 @@ class FreedomViewModel(application: Application) : AndroidViewModel(application)
         repository.allowedWebsitesFlow,
         repository.customBlockedWebsitesFlow
     ) { active, blocklists, apps, allowedWebs, customBlocked ->
-        CoreDbBundle(active, blocklists, apps, allowedWebs, customBlocked)
+        val grouped = apps.groupBy { it.blocklistId }
+        val pkgSets = grouped.mapValues { (_, list) -> list.map { it.packageName }.toSet() }
+        CoreDbBundle(
+            active = active,
+            blocklists = blocklists,
+            allowedAppsByBlocklist = grouped,
+            allowedPackagesByBlocklist = pkgSets,
+            allowedWebsites = allowedWebs,
+            customBlockedWebsites = customBlocked
+        )
     }
 
     private val secondaryFlow = combine(
@@ -160,10 +181,9 @@ class FreedomViewModel(application: Application) : AndroidViewModel(application)
         _installedApps,
         _isLoadingApps,
         _permissions,
-        _ticker,
         FreedomAccessibilityService.isRunning
-    ) { apps, loading, perms, tick, _ ->
-        Triple(apps, loading, perms to tick)
+    ) { apps, loading, perms, _ ->
+        Triple(apps, loading, perms)
     }
 
     val uiState: StateFlow<FreedomUiState> = combine(
@@ -172,26 +192,12 @@ class FreedomViewModel(application: Application) : AndroidViewModel(application)
         prefsFlow,
         runtimeFlow
     ) { core, sec, prefs, runtime ->
-        val (apps, loading, permsAndTick) = runtime
-        val (perms, _) = permsAndTick
-        val active = core.active
-        val remaining = if (active != null && active.active) {
-            val wallRem = (active.endWallMs - System.currentTimeMillis()).coerceAtLeast(0L)
-            val monoRem = if (active.endElapsedRealtimeMs > 0L) {
-                (active.endElapsedRealtimeMs - SystemClock.elapsedRealtime()).coerceAtLeast(0L)
-            } else {
-                0L
-            }
-            maxOf(wallRem, monoRem)
-        } else {
-            0L
-        }
-
+        val (apps, loading, perms) = runtime
         FreedomUiState(
-            activeSession = active,
-            remainingMillis = remaining,
+            activeSession = core.active,
             blocklists = core.blocklists,
-            allowedAppsByBlocklist = core.allAllowedApps.groupBy { it.blocklistId },
+            allowedAppsByBlocklist = core.allowedAppsByBlocklist,
+            allowedPackagesByBlocklist = core.allowedPackagesByBlocklist,
             allowedWebsites = core.allowedWebsites,
             customBlockedWebsites = core.customBlockedWebsites,
             autoLearnedCount = sec.autoLearnedCount,
@@ -224,16 +230,35 @@ class FreedomViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch {
             repository.reconcileSessionState()
         }
+        // Only tick countdown while a focus session is active (0 recompositions when idle!)
         viewModelScope.launch {
             while (isActive) {
-                _ticker.value = SystemClock.elapsedRealtime()
-                val current = uiState.value.activeSession
-                if (current != null && uiState.value.remainingMillis == 0L) {
-                    repository.reconcileSessionState()
+                val active = uiState.value.activeSession
+                if (active != null && active.active) {
+                    val rem = computeRemaining(active)
+                    _remainingMillis.value = rem
+                    if (rem == 0L) {
+                        repository.reconcileSessionState()
+                    }
+                    delay(1_000L)
+                } else {
+                    if (_remainingMillis.value != 0L) {
+                        _remainingMillis.value = 0L
+                    }
+                    delay(1_000L)
                 }
-                delay(1_000L)
             }
         }
+    }
+
+    private fun computeRemaining(active: FocusSessionEntity): Long {
+        val wallRem = (active.endWallMs - System.currentTimeMillis()).coerceAtLeast(0L)
+        val monoRem = if (active.endElapsedRealtimeMs > 0L) {
+            (active.endElapsedRealtimeMs - SystemClock.elapsedRealtime()).coerceAtLeast(0L)
+        } else {
+            0L
+        }
+        return maxOf(wallRem, monoRem)
     }
 
     fun refreshPermissions() {
@@ -259,6 +284,7 @@ class FreedomViewModel(application: Application) : AndroidViewModel(application)
             val perms = permissionChecker.check()
             _permissions.value = perms
             repository.startImmediateSession(label, blocklistId, durationMinutes, strictMode)
+            _remainingMillis.value = durationMinutes * 60_000L
             if (!perms.isCoreBlockingReady) {
                 _messages.tryEmit("Session started — enable Accessibility in Settings for real-time blocking.")
             } else {
@@ -312,7 +338,10 @@ class FreedomViewModel(application: Application) : AndroidViewModel(application)
     fun stopActiveSession() {
         viewModelScope.launch {
             when (val res = repository.stopActiveSession()) {
-                StrictModePolicy.GuardResult.Permitted -> _messages.tryEmit("Session ended.")
+                StrictModePolicy.GuardResult.Permitted -> {
+                    _remainingMillis.value = 0L
+                    _messages.tryEmit("Session ended.")
+                }
                 is StrictModePolicy.GuardResult.Denied -> _messages.tryEmit(res.reason)
             }
         }
@@ -321,6 +350,7 @@ class FreedomViewModel(application: Application) : AndroidViewModel(application)
     fun extendActiveSession(extraMinutes: Int) {
         viewModelScope.launch {
             repository.extendActiveSession(extraMinutes)
+            _remainingMillis.value = (_remainingMillis.value + extraMinutes * 60_000L)
             _messages.tryEmit("Extended by $extraMinutes min.")
         }
     }

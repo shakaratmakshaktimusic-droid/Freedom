@@ -83,7 +83,7 @@ import com.example.ui.theme.GlassDivider
 import com.example.ui.theme.GlassGroupedRow
 import com.example.ui.theme.GlassPillButton
 import com.example.ui.theme.GlassSegmentedControl
-import com.example.ui.theme.JetBrainsMono
+import com.example.ui.theme.InterFontFamily
 import com.example.ui.theme.colorOsPressScale
 import com.example.ui.theme.rememberFreedomHaptics
 import java.text.SimpleDateFormat
@@ -211,19 +211,19 @@ fun SessionsScreen(
                 )
             }
 
-            // Seamless directional spring transition between NOW | LATER | RECURRING
+            // Calm, zero-bounce directional transition between NOW | LATER | RECURRING
             AnimatedContent(
                 targetState = activeTab,
                 modifier = Modifier.weight(1f),
                 transitionSpec = {
                     val forward = targetState.ordinal >= initialState.ordinal
                     (slideInHorizontally(
-                        animationSpec = FreedomMotion.FluidIntOffsetSpring,
-                        initialOffsetX = { if (forward) it / 8 else -it / 8 }
-                    ) + fadeIn(tween(200))) togetherWith (slideOutHorizontally(
-                        animationSpec = FreedomMotion.FluidIntOffsetSpring,
-                        targetOffsetX = { if (forward) -it / 10 else it / 10 }
-                    ) + fadeOut(tween(150)))
+                        animationSpec = FreedomMotion.SlideOffsetSpec,
+                        initialOffsetX = { if (forward) it / 14 else -it / 14 }
+                    ) + fadeIn(FreedomMotion.FastFadeIn)) togetherWith (slideOutHorizontally(
+                        animationSpec = FreedomMotion.SlideOffsetSpec,
+                        targetOffsetX = { if (forward) -it / 18 else it / 18 }
+                    ) + fadeOut(FreedomMotion.FastFadeOut))
                 },
                 label = "sessions_subtab_content"
             ) { tabMode ->
@@ -235,7 +235,7 @@ fun SessionsScreen(
                             verticalArrangement = Arrangement.spacedBy(16.dp)
                         ) {
                             // Name glass card
-                            item {
+                            item(key = "now_name_card") {
                                 GlassCard(contentPadding = PaddingValues(horizontal = 18.dp, vertical = 16.dp)) {
                                     Row(
                                         modifier = Modifier.fillMaxWidth(),
@@ -270,7 +270,7 @@ fun SessionsScreen(
                             }
 
                             // Blocklist & Locked Mode grouped card
-                            item {
+                            item(key = "now_config_card") {
                                 GlassCard(contentPadding = PaddingValues(vertical = 2.dp)) {
                                     GlassGroupedRow(
                                         title = "Blocklist",
@@ -314,11 +314,10 @@ fun SessionsScreen(
                                 }
                             }
 
-                            // Duration / End Time glass card with 3D Rotary Wheel Picker (Screenshot 1!)
-                            item {
+                            // Duration / End Time glass card with 3D Rotary Wheel Picker
+                            item(key = "now_duration_card") {
                                 GlassCard(
-                                    contentPadding = PaddingValues(16.dp),
-                                    animateSize = true
+                                    contentPadding = PaddingValues(16.dp)
                                 ) {
                                     GlassSegmentedControl(
                                         options = listOf("Length", "End Time"),
@@ -331,12 +330,12 @@ fun SessionsScreen(
                                     AnimatedContent(
                                         targetState = useEndTimeMode,
                                         transitionSpec = {
-                                            (fadeIn(tween(200)) + slideInHorizontally(
-                                                animationSpec = FreedomMotion.FluidIntOffsetSpring,
-                                                initialOffsetX = { if (targetState) it / 10 else -it / 10 }
-                                            )) togetherWith (fadeOut(tween(150)) + slideOutHorizontally(
-                                                animationSpec = FreedomMotion.FluidIntOffsetSpring,
-                                                targetOffsetX = { if (targetState) -it / 12 else it / 12 }
+                                            (fadeIn(FreedomMotion.FastFadeIn) + slideInHorizontally(
+                                                animationSpec = FreedomMotion.SlideOffsetSpec,
+                                                initialOffsetX = { if (targetState) it / 16 else -it / 16 }
+                                            )) togetherWith (fadeOut(FreedomMotion.FastFadeOut) + slideOutHorizontally(
+                                                animationSpec = FreedomMotion.SlideOffsetSpec,
+                                                targetOffsetX = { if (targetState) -it / 18 else it / 18 }
                                             ))
                                         },
                                         label = "length_vs_endtime"
@@ -407,8 +406,9 @@ fun SessionsScreen(
                                                 Text(
                                                     text = "Total duration: ${formatMinutesHuman(computeNowDurationMinutes())}",
                                                     style = MaterialTheme.typography.bodyMedium.copy(
-                                                        fontFamily = JetBrainsMono,
-                                                        fontWeight = FontWeight.SemiBold
+                                                        fontFamily = InterFontFamily,
+                                                        fontWeight = FontWeight.SemiBold,
+                                                        fontFeatureSettings = "tnum"
                                                     ),
                                                     color = g.primaryAccent
                                                 )
@@ -421,13 +421,15 @@ fun SessionsScreen(
                     }
 
                     SessionTabMode.LATER -> {
-                        val laterSchedules = uiState.schedules.filter { !it.isRecurring }
+                        val laterSchedules = remember(uiState.schedules) {
+                            uiState.schedules.filter { !it.isRecurring }
+                        }
                         LazyColumn(
                             modifier = Modifier.fillMaxSize(),
                             contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 4.dp, bottom = 104.dp),
                             verticalArrangement = Arrangement.spacedBy(16.dp)
                         ) {
-                            item {
+                            item(key = "later_name_card") {
                                 GlassCard(contentPadding = PaddingValues(horizontal = 18.dp, vertical = 16.dp)) {
                                     Row(
                                         modifier = Modifier.fillMaxWidth(),
@@ -455,7 +457,7 @@ fun SessionsScreen(
                                 }
                             }
 
-                            item {
+                            item(key = "later_config_card") {
                                 GlassCard(contentPadding = PaddingValues(vertical = 2.dp)) {
                                     GlassGroupedRow(
                                         title = "Blocklist",
@@ -491,10 +493,9 @@ fun SessionsScreen(
                                 }
                             }
 
-                            item {
+                            item(key = "later_time_card") {
                                 GlassCard(
-                                    contentPadding = PaddingValues(18.dp),
-                                    animateSize = true
+                                    contentPadding = PaddingValues(18.dp)
                                 ) {
                                     GlassSegmentedControl(
                                         options = listOf("Today", "Tomorrow"),
@@ -564,7 +565,7 @@ fun SessionsScreen(
                             }
 
                             if (laterSchedules.isNotEmpty()) {
-                                item {
+                                item(key = "later_upcoming_header") {
                                     Text(
                                         text = "Upcoming One-Time Sessions",
                                         style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
@@ -605,14 +606,19 @@ fun SessionsScreen(
                     }
 
                     SessionTabMode.RECURRING -> {
-                        val recurringList = uiState.schedules.filter { it.isRecurring }
+                        val recurringList = remember(uiState.schedules) {
+                            uiState.schedules.filter { it.isRecurring }
+                        }
+                        val blocklistNamesById = remember(uiState.blocklists) {
+                            uiState.blocklists.associate { it.id to it.name }
+                        }
                         LazyColumn(
                             modifier = Modifier.fillMaxSize(),
                             contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 4.dp, bottom = 104.dp),
                             verticalArrangement = Arrangement.spacedBy(14.dp)
                         ) {
                             if (recurringList.isEmpty()) {
-                                item {
+                                item(key = "recurring_empty") {
                                     GlassCard(contentPadding = PaddingValues(24.dp)) {
                                         Text(
                                             text = "No Recurring Schedules",
@@ -629,7 +635,7 @@ fun SessionsScreen(
                                 }
                             } else {
                                 items(recurringList, key = { it.id }) { sched ->
-                                    val profileName = uiState.blocklists.firstOrNull { it.id == sched.blocklistId }?.name ?: "Blocklist"
+                                    val profileName = blocklistNamesById[sched.blocklistId] ?: "Blocklist"
                                     GlassCard(
                                         contentPadding = PaddingValues(18.dp),
                                         onClick = { editingRecurring = sched }
@@ -660,7 +666,11 @@ fun SessionsScreen(
                                                     text = "${ScheduleCalculator.formatMinuteOfDay(sched.startMinuteOfDay)} – " +
                                                         "${ScheduleCalculator.formatMinuteOfDay(sched.endMinuteOfDay)} · " +
                                                         ScheduleCalculator.formatDaysSummary(sched.daysMask),
-                                                    style = MaterialTheme.typography.bodyMedium.copy(fontFamily = JetBrainsMono),
+                                                    style = MaterialTheme.typography.bodyMedium.copy(
+                                                        fontFamily = InterFontFamily,
+                                                        fontWeight = FontWeight.SemiBold,
+                                                        fontFeatureSettings = "tnum"
+                                                    ),
                                                     color = g.primaryAccent
                                                 )
                                                 Spacer(Modifier.height(2.dp))
@@ -871,24 +881,24 @@ private fun DurationPillChip(
 
     val bgColor by animateColorAsState(
         targetValue = if (selected) g.primaryAccent else g.glassSurfaceElevated,
-        animationSpec = tween(180),
+        animationSpec = tween(140),
         label = "chip_bg"
     )
     val contentColor by animateColorAsState(
         targetValue = if (selected) g.onPrimaryAccent else g.primaryAccent,
-        animationSpec = tween(180),
+        animationSpec = tween(140),
         label = "chip_fg"
     )
     val borderColor by animateColorAsState(
         targetValue = if (selected) g.primaryAccent else g.glassBorder,
-        animationSpec = tween(180),
+        animationSpec = tween(140),
         label = "chip_border"
     )
 
     Row(
         modifier = Modifier
             .heightIn(min = 44.dp)
-            .colorOsPressScale(interactionSource, pressedScale = 0.94f)
+            .colorOsPressScale(interactionSource, pressedScale = 0.97f)
             .clip(shape)
             .background(bgColor)
             .border(1.dp, borderColor, shape)

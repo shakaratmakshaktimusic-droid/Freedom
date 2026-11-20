@@ -7,7 +7,6 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -27,7 +26,6 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.testTag
@@ -38,6 +36,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlin.math.abs
+
+// Pre-allocated static label arrays (zero list/String.format allocations while scrolling)
+private val DURATION_HOUR_LABELS = List(25) { "$it" }
+private val DURATION_MINUTE_LABELS = List(60) { "$it" }
+private val CLOCK_HOUR_LABELS = List(24) { if (it < 10) "0$it" else "$it" }
+private val CLOCK_MINUTE_LABELS = List(60) { if (it < 10) "0$it" else "$it" }
+private val WheelCapsuleShape = RoundedCornerShape(14.dp)
 
 /**
  * Pure duration-clamping helper for the 0–24 hour minute-by-minute rotary wheel:
@@ -61,17 +66,14 @@ object DurationWheelBounds {
 }
 
 /**
- * ColorOS-inspired 3D-perspective rotary scroll wheel picker matching Screenshot 1:
- *  - Smooth GPU graphicsLayer perspective tilt, scale, and opacity falloff
- *  - 120 Hz snap fling physics with subtle CLOCK_TICK haptics on every detent
- *  - Translucent central highlight capsule across the selected row
+ * 60 FPS GPU-accelerated 3D rotary scroll wheel picker using Inter tabular numerals.
  */
 @Composable
 fun DurationWheelPicker(
     totalMinutes: Int,
     onMinutesChanged: (Int) -> Unit,
     modifier: Modifier = Modifier,
-    wheelHeight: Dp = 204.dp
+    wheelHeight: Dp = 200.dp
 ) {
     val g = FreedomGlass.colors
     val (currentHours, currentMins) = remember(totalMinutes) {
@@ -79,10 +81,10 @@ fun DurationWheelPicker(
     }
     val latestHours by rememberUpdatedState(currentHours)
     val latestMins by rememberUpdatedState(currentMins)
+    val latestTotal by rememberUpdatedState(totalMinutes)
     val latestCallback by rememberUpdatedState(onMinutesChanged)
 
     val itemHeight = 42.dp
-    val capsuleShape = RoundedCornerShape(14.dp)
 
     Box(
         modifier = modifier
@@ -91,21 +93,20 @@ fun DurationWheelPicker(
             .testTag("duration_wheel_picker"),
         contentAlignment = Alignment.Center
     ) {
-        // Central frosted highlight bar matching Screenshot 1
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(itemHeight + 4.dp)
-                .clip(capsuleShape)
+                .clip(WheelCapsuleShape)
                 .background(
-                    if (g.isDark) Color.White.copy(alpha = 0.11f)
-                    else g.primaryAccent.copy(alpha = 0.12f)
+                    if (g.isDark) Color.White.copy(alpha = 0.10f)
+                    else g.primaryAccent.copy(alpha = 0.11f)
                 )
                 .border(
                     width = 1.dp,
                     color = if (g.isDark) Color.White.copy(alpha = 0.14f)
                     else g.primaryAccent.copy(alpha = 0.22f),
-                    shape = capsuleShape
+                    shape = WheelCapsuleShape
                 )
         )
 
@@ -116,16 +117,14 @@ fun DurationWheelPicker(
             horizontalArrangement = Arrangement.Center,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Hours wheel (0..24)
             RotaryWheelColumn(
-                items = (0..24).toList(),
+                labels = DURATION_HOUR_LABELS,
                 selectedIndex = currentHours.coerceIn(0, 24),
                 itemHeight = itemHeight,
                 wheelHeight = wheelHeight,
-                formatItem = { "$it" },
                 onSelectedIndexChange = { newHour ->
                     val clamped = DurationWheelBounds.clampDuration(newHour, latestMins)
-                    if (clamped != totalMinutes) {
+                    if (clamped != latestTotal) {
                         latestCallback(clamped)
                     }
                 },
@@ -137,22 +136,20 @@ fun DurationWheelPicker(
                 text = "H",
                 style = MaterialTheme.typography.titleMedium.copy(
                     fontWeight = FontWeight.Bold,
-                    letterSpacing = 0.6.sp
+                    letterSpacing = 0.5.sp
                 ),
                 color = g.textPrimary,
                 modifier = Modifier.padding(start = 2.dp, end = 22.dp)
             )
 
-            // Minutes wheel (0..59)
             RotaryWheelColumn(
-                items = (0..59).toList(),
+                labels = DURATION_MINUTE_LABELS,
                 selectedIndex = currentMins.coerceIn(0, 59),
                 itemHeight = itemHeight,
                 wheelHeight = wheelHeight,
-                formatItem = { "$it" },
                 onSelectedIndexChange = { newMin ->
                     val clamped = DurationWheelBounds.clampDuration(latestHours, newMin)
-                    if (clamped != totalMinutes) {
+                    if (clamped != latestTotal) {
                         latestCallback(clamped)
                     }
                 },
@@ -164,7 +161,7 @@ fun DurationWheelPicker(
                 text = "MIN",
                 style = MaterialTheme.typography.titleMedium.copy(
                     fontWeight = FontWeight.Bold,
-                    letterSpacing = 0.6.sp
+                    letterSpacing = 0.5.sp
                 ),
                 color = g.textPrimary,
                 modifier = Modifier.padding(start = 2.dp)
@@ -174,15 +171,14 @@ fun DurationWheelPicker(
 }
 
 /**
- * Smooth minute-by-minute 24-hour clock time rotary wheel (00:00–23:59) used in
- * End Time, Later, and Recurring schedule editors.
+ * Smooth minute-by-minute 24-hour clock time rotary wheel (00:00–23:59).
  */
 @Composable
 fun ClockTimeWheelPicker(
     minuteOfDay: Int,
     onMinuteOfDayChanged: (Int) -> Unit,
     modifier: Modifier = Modifier,
-    wheelHeight: Dp = 186.dp
+    wheelHeight: Dp = 184.dp
 ) {
     val g = FreedomGlass.colors
     val normalized = ((minuteOfDay % 1440) + 1440) % 1440
@@ -191,10 +187,10 @@ fun ClockTimeWheelPicker(
 
     val latestHour by rememberUpdatedState(currentHour)
     val latestMinute by rememberUpdatedState(currentMinute)
+    val latestNormalized by rememberUpdatedState(normalized)
     val latestCallback by rememberUpdatedState(onMinuteOfDayChanged)
 
     val itemHeight = 40.dp
-    val capsuleShape = RoundedCornerShape(14.dp)
 
     Box(
         modifier = modifier
@@ -207,16 +203,16 @@ fun ClockTimeWheelPicker(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(itemHeight + 4.dp)
-                .clip(capsuleShape)
+                .clip(WheelCapsuleShape)
                 .background(
-                    if (g.isDark) Color.White.copy(alpha = 0.11f)
-                    else g.primaryAccent.copy(alpha = 0.12f)
+                    if (g.isDark) Color.White.copy(alpha = 0.10f)
+                    else g.primaryAccent.copy(alpha = 0.11f)
                 )
                 .border(
                     width = 1.dp,
                     color = if (g.isDark) Color.White.copy(alpha = 0.14f)
                     else g.primaryAccent.copy(alpha = 0.22f),
-                    shape = capsuleShape
+                    shape = WheelCapsuleShape
                 )
         )
 
@@ -228,14 +224,13 @@ fun ClockTimeWheelPicker(
             verticalAlignment = Alignment.CenterVertically
         ) {
             RotaryWheelColumn(
-                items = (0..23).toList(),
+                labels = CLOCK_HOUR_LABELS,
                 selectedIndex = currentHour,
                 itemHeight = itemHeight,
                 wheelHeight = wheelHeight,
-                formatItem = { String.format("%02d", it) },
                 onSelectedIndexChange = { newH ->
                     val next = newH * 60 + latestMinute
-                    if (next != normalized) latestCallback(next)
+                    if (next != latestNormalized) latestCallback(next)
                 },
                 modifier = Modifier
                     .width(72.dp)
@@ -245,22 +240,21 @@ fun ClockTimeWheelPicker(
             Text(
                 text = ":",
                 style = MaterialTheme.typography.headlineSmall.copy(
-                    fontFamily = JetBrainsMono,
-                    fontWeight = FontWeight.Bold
+                    fontWeight = FontWeight.Bold,
+                    fontFeatureSettings = "tnum"
                 ),
                 color = g.primaryAccent,
                 modifier = Modifier.padding(horizontal = 8.dp)
             )
 
             RotaryWheelColumn(
-                items = (0..59).toList(),
+                labels = CLOCK_MINUTE_LABELS,
                 selectedIndex = currentMinute,
                 itemHeight = itemHeight,
                 wheelHeight = wheelHeight,
-                formatItem = { String.format("%02d", it) },
                 onSelectedIndexChange = { newM ->
                     val next = latestHour * 60 + newM
-                    if (next != normalized) latestCallback(next)
+                    if (next != latestNormalized) latestCallback(next)
                 },
                 modifier = Modifier
                     .width(72.dp)
@@ -272,31 +266,32 @@ fun ClockTimeWheelPicker(
 
 @Composable
 private fun RotaryWheelColumn(
-    items: List<Int>,
+    labels: List<String>,
     selectedIndex: Int,
     itemHeight: Dp,
     wheelHeight: Dp,
-    formatItem: (Int) -> String,
     onSelectedIndexChange: (Int) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val g = FreedomGlass.colors
     val haptics = rememberFreedomHaptics()
-    val safeInitial = selectedIndex.coerceIn(0, (items.size - 1).coerceAtLeast(0))
+    val maxIdx = (labels.size - 1).coerceAtLeast(0)
+    val safeInitial = selectedIndex.coerceIn(0, maxIdx)
     val listState = rememberLazyListState(initialFirstVisibleItemIndex = safeInitial)
     val flingBehavior = rememberSnapFlingBehavior(lazyListState = listState)
-    val verticalPadding = ((wheelHeight - itemHeight) / 2).coerceAtLeast(0.dp)
+    val verticalPadding = remember(wheelHeight, itemHeight) {
+        ((wheelHeight - itemHeight) / 2).coerceAtLeast(0.dp)
+    }
     val latestOnSelect by rememberUpdatedState(onSelectedIndexChange)
 
-    // Keep wheel aligned if caller changes value externally (e.g. clamping 24H -> 00 MIN)
+    // Keep wheel aligned only when caller changes value externally (e.g. clamping 24H -> 00 MIN)
     LaunchedEffect(selectedIndex) {
-        val target = selectedIndex.coerceIn(0, (items.size - 1).coerceAtLeast(0))
+        val target = selectedIndex.coerceIn(0, maxIdx)
         if (!listState.isScrollInProgress && listState.firstVisibleItemIndex != target) {
             listState.animateScrollToItem(target)
         }
     }
 
-    // Track currently centered item continuously for crisp haptic tick & live updates
     val centeredIndex by remember {
         derivedStateOf {
             val layoutInfo = listState.layoutInfo
@@ -317,7 +312,7 @@ private fun RotaryWheelColumn(
         snapshotFlow { centeredIndex }
             .distinctUntilChanged()
             .collect { idx ->
-                val bounded = idx.coerceIn(0, (items.size - 1).coerceAtLeast(0))
+                val bounded = idx.coerceIn(0, maxIdx)
                 if (initialized) {
                     haptics.tick()
                     latestOnSelect(bounded)
@@ -325,6 +320,23 @@ private fun RotaryWheelColumn(
                     initialized = true
                 }
             }
+    }
+
+    val centerTextStyle = remember {
+        androidx.compose.ui.text.TextStyle(
+            fontFamily = InterFontFamily,
+            fontWeight = FontWeight.Bold,
+            fontSize = 23.sp,
+            fontFeatureSettings = "tnum"
+        )
+    }
+    val outerTextStyle = remember {
+        androidx.compose.ui.text.TextStyle(
+            fontFamily = InterFontFamily,
+            fontWeight = FontWeight.Medium,
+            fontSize = 22.sp,
+            fontFeatureSettings = "tnum"
+        )
     }
 
     Box(modifier = modifier.height(wheelHeight)) {
@@ -335,8 +347,11 @@ private fun RotaryWheelColumn(
             horizontalAlignment = Alignment.CenterHorizontally,
             modifier = Modifier.fillMaxWidth()
         ) {
-            items(items.size, key = { it }) { index ->
-                val isCenter = index == centeredIndex
+            items(labels.size, key = { it }) { index ->
+                // Scoped derivedStateOf so ONLY the 2 rows entering/leaving center recompose
+                val isCenter by remember(index) {
+                    derivedStateOf { centeredIndex == index }
+                }
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -351,27 +366,21 @@ private fun RotaryWheelColumn(
                             } else {
                                 viewportCenter
                             }
-                            val distanceRatio =
-                                ((itemCenter - viewportCenter) / (wheelHeight.toPx() / 2f))
-                                    .coerceIn(-1f, 1f)
+                            val halfHeight = (wheelHeight.toPx() / 2f).coerceAtLeast(1f)
+                            val distanceRatio = ((itemCenter - viewportCenter) / halfHeight).coerceIn(-1f, 1f)
                             val absDist = abs(distanceRatio)
-                            val scaleVal = 1f - (absDist * 0.28f)
+                            val scaleVal = 1f - (absDist * 0.22f)
                             scaleX = scaleVal
                             scaleY = scaleVal
-                            alpha = (1f - absDist * 0.78f).coerceIn(0.18f, 1f)
-                            rotationX = -distanceRatio * 38f
-                            cameraDistance = 14f * density
+                            alpha = (1f - absDist * 0.72f).coerceIn(0.22f, 1f)
+                            rotationX = -distanceRatio * 24f
+                            cameraDistance = 16f * density
                         },
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        text = formatItem(items[index]),
-                        style = MaterialTheme.typography.headlineSmall.copy(
-                            fontFamily = JetBrainsMono,
-                            fontWeight = if (isCenter) FontWeight.Bold else FontWeight.Medium,
-                            fontSize = 23.sp,
-                            fontFeatureSettings = "tnum"
-                        ),
+                        text = labels[index],
+                        style = if (isCenter) centerTextStyle else outerTextStyle,
                         color = if (isCenter) g.textPrimary else g.textSecondary,
                         textAlign = TextAlign.Center
                     )

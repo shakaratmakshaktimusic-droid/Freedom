@@ -7,12 +7,10 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.scaleIn
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
@@ -21,6 +19,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -32,7 +31,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -68,6 +66,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -82,7 +81,6 @@ import com.example.ui.theme.ForestGlassBackdrop
 import com.example.ui.theme.FreedomGlass
 import com.example.ui.theme.FreedomMotion
 import com.example.ui.theme.FreedomTheme
-import com.example.ui.theme.colorOsPressScale
 import com.example.ui.theme.rememberFreedomHaptics
 
 private enum class FreedomTab(
@@ -96,6 +94,9 @@ private enum class FreedomTab(
     BLOCKLISTS("Blocklists", Icons.Rounded.Shield, Icons.Outlined.Shield, "nav_blocklists"),
     SETTINGS("Settings", Icons.Rounded.Settings, Icons.Outlined.Settings, "nav_settings")
 }
+
+private val DockShape = RoundedCornerShape(26.dp)
+private val DockCapsuleShape = RoundedCornerShape(20.dp)
 
 class MainActivity : ComponentActivity() {
 
@@ -133,7 +134,7 @@ private fun FreedomAppRoot(viewModel: FreedomViewModel) {
 
     val mood = when {
         uiState.isStrictModeActive -> BackdropMood.LOCKED
-        uiState.activeSession?.active == true && uiState.remainingMillis > 0L -> BackdropMood.ACTIVE
+        uiState.isSessionActive -> BackdropMood.ACTIVE
         else -> BackdropMood.CALM
     }
 
@@ -155,33 +156,31 @@ private fun FreedomAppRoot(viewModel: FreedomViewModel) {
                     .statusBarsPadding()
                     .padding(innerPadding)
             ) {
-                // ColorOS-style seamless directional spring tab transitions
+                // Smooth, critically-damped directional tab transitions (zero rubbery bounce)
                 AnimatedContent(
                     targetState = currentTab,
                     transitionSpec = {
                         val movingRight = targetState.ordinal >= initialState.ordinal
                         val enterOffset: (Int) -> Int = { fullWidth ->
-                            if (movingRight) fullWidth / 9 else -fullWidth / 9
+                            if (movingRight) fullWidth / 14 else -fullWidth / 14
                         }
                         val exitOffset: (Int) -> Int = { fullWidth ->
-                            if (movingRight) -fullWidth / 12 else fullWidth / 12
+                            if (movingRight) -fullWidth / 18 else fullWidth / 18
                         }
                         (slideInHorizontally(
-                            animationSpec = FreedomMotion.FluidIntOffsetSpring,
+                            animationSpec = FreedomMotion.SlideOffsetSpec,
                             initialOffsetX = enterOffset
-                        ) + fadeIn(animationSpec = tween(220)) + scaleIn(
-                            initialScale = 0.985f,
-                            animationSpec = FreedomMotion.FluidFloatSpring
-                        )) togetherWith (slideOutHorizontally(
-                            animationSpec = FreedomMotion.FluidIntOffsetSpring,
+                        ) + fadeIn(animationSpec = FreedomMotion.FastFadeIn)) togetherWith (slideOutHorizontally(
+                            animationSpec = FreedomMotion.SlideOffsetSpec,
                             targetOffsetX = exitOffset
-                        ) + fadeOut(animationSpec = tween(160)))
+                        ) + fadeOut(animationSpec = FreedomMotion.FastFadeOut))
                     },
                     label = "freedom_main_tabs"
                 ) { tab ->
                     when (tab) {
                         FreedomTab.TODAY -> TodayScreen(
                             uiState = uiState,
+                            remainingMillisFlow = viewModel.remainingMillis,
                             onStartSessionClick = { currentTab = FreedomTab.SESSIONS },
                             onStopSession = { viewModel.stopActiveSession() },
                             onExtendSession = { viewModel.extendActiveSession(it) },
@@ -242,8 +241,8 @@ private fun FreedomAppRoot(viewModel: FreedomViewModel) {
 }
 
 /**
- * ColorOS-inspired floating frosted glass bottom dock with a fluid spring-sliding
- * active capsule, GPU icon bounce, and subtle haptic tap feedback.
+ * Floating frosted glass bottom dock with GPU-translated sliding active capsule
+ * (zero layout invalidations during tab switches).
  */
 @Composable
 private fun FreedomBottomNavBar(
@@ -252,16 +251,21 @@ private fun FreedomBottomNavBar(
 ) {
     val g = FreedomGlass.colors
     val haptics = rememberFreedomHaptics()
-    val dockShape = RoundedCornerShape(28.dp)
     val tabs = FreedomTab.entries
     val selectedIdx = currentTab.ordinal
+    val density = LocalDensity.current
 
-    val rimBrush = Brush.verticalGradient(
-        colors = listOf(
-            if (g.isDark) Color.White.copy(alpha = 0.16f) else Color.White.copy(alpha = 0.95f),
-            g.glassBorder
+    val rimBorder = remember(g.isDark, g.glassBorder) {
+        BorderStroke(
+            width = 1.dp,
+            brush = Brush.verticalGradient(
+                colors = listOf(
+                    if (g.isDark) Color.White.copy(alpha = 0.16f) else Color.White.copy(alpha = 0.96f),
+                    g.glassBorder
+                )
+            )
         )
-    )
+    }
 
     Box(
         modifier = Modifier
@@ -270,34 +274,37 @@ private fun FreedomBottomNavBar(
             .padding(horizontal = 16.dp, vertical = 10.dp)
     ) {
         Surface(
-            shape = dockShape,
-            color = g.navSurface.copy(alpha = if (g.isDark) 0.92f else 0.94f),
-            shadowElevation = if (g.isDark) 6.dp else 10.dp,
+            shape = DockShape,
+            color = g.navSurface,
+            shadowElevation = if (g.isDark) 4.dp else 8.dp,
             modifier = Modifier
                 .fillMaxWidth()
-                .height(68.dp)
-                .clip(dockShape)
-                .border(BorderStroke(1.dp, rimBrush), dockShape)
+                .height(66.dp)
+                .clip(DockShape)
+                .border(rimBorder, DockShape)
         ) {
             BoxWithConstraints(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(6.dp)
+                    .padding(5.dp)
             ) {
                 val tabWidth = maxWidth / tabs.size
-                val indicatorOffset by animateDpAsState(
-                    targetValue = tabWidth * selectedIdx,
-                    animationSpec = FreedomMotion.SnappyDpSpring,
+                val tabWidthPx = with(density) { tabWidth.toPx() }
+                val animatedIndex by animateFloatAsState(
+                    targetValue = selectedIdx.toFloat(),
+                    animationSpec = FreedomMotion.CrispFloatSpec,
                     label = "dock_active_capsule"
                 )
 
-                // Fluid sliding luminous capsule under the active tab
+                // GPU-only sliding capsule under the active tab
                 Box(
                     modifier = Modifier
-                        .offset(x = indicatorOffset)
                         .width(tabWidth)
                         .fillMaxHeight()
-                        .clip(RoundedCornerShape(22.dp))
+                        .graphicsLayer {
+                            translationX = animatedIndex * tabWidthPx
+                        }
+                        .clip(DockCapsuleShape)
                         .background(g.primarySoft)
                 )
 
@@ -308,14 +315,9 @@ private fun FreedomBottomNavBar(
                     tabs.forEach { tab ->
                         val selected = tab == currentTab
                         val interactionSource = remember { MutableInteractionSource() }
-                        val iconScale by animateFloatAsState(
-                            targetValue = if (selected) 1.08f else 0.96f,
-                            animationSpec = FreedomMotion.SnappyFloatSpring,
-                            label = "dock_icon_scale"
-                        )
                         val contentColor by animateColorAsState(
                             targetValue = if (selected) g.primaryAccent else g.textSecondary,
-                            animationSpec = tween(durationMillis = 180),
+                            animationSpec = tween(durationMillis = 150),
                             label = "dock_tint"
                         )
 
@@ -323,8 +325,7 @@ private fun FreedomBottomNavBar(
                             modifier = Modifier
                                 .weight(1f)
                                 .fillMaxHeight()
-                                .clip(RoundedCornerShape(22.dp))
-                                .colorOsPressScale(interactionSource, pressedScale = 0.93f)
+                                .clip(DockCapsuleShape)
                                 .clickable(
                                     interactionSource = interactionSource,
                                     indication = null
@@ -336,24 +337,19 @@ private fun FreedomBottomNavBar(
                                 }
                                 .testTag(tab.tag),
                             horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = androidx.compose.foundation.layout.Arrangement.Center
+                            verticalArrangement = Arrangement.Center
                         ) {
                             Icon(
                                 imageVector = if (selected) tab.selectedIcon else tab.unselectedIcon,
                                 contentDescription = tab.label,
                                 tint = contentColor,
-                                modifier = Modifier
-                                    .size(23.dp)
-                                    .graphicsLayer {
-                                        scaleX = iconScale
-                                        scaleY = iconScale
-                                    }
+                                modifier = Modifier.size(22.dp)
                             )
                             Spacer(Modifier.height(3.dp))
                             Text(
                                 text = tab.label,
                                 style = MaterialTheme.typography.labelSmall.copy(
-                                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium
+                                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium
                                 ),
                                 color = contentColor
                             )
