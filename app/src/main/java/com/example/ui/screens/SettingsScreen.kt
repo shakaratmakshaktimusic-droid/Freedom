@@ -5,6 +5,13 @@ import android.os.Build
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -52,6 +59,7 @@ import com.example.domain.FilterUpdateFrequency
 import com.example.domain.ThemeMode
 import com.example.ui.FreedomUiState
 import com.example.ui.theme.FreedomGlass
+import com.example.ui.theme.FreedomMotion
 import com.example.ui.theme.FreedomSwitch
 import com.example.ui.theme.GlassCard
 import com.example.ui.theme.GlassDivider
@@ -105,51 +113,66 @@ fun SettingsScreen(
         )
     }
 
-    when (subScreen) {
-        SettingsSubScreen.ROOT -> {
-            SettingsRootView(
-                uiState = uiState,
-                onOpenBlockingSettings = { subScreen = SettingsSubScreen.BLOCKING_SETTINGS },
-                onOpenFilterUpdates = { subScreen = SettingsSubScreen.FILTER_UPDATES },
-                onOpenAbout = { subScreen = SettingsSubScreen.ABOUT },
-                onSetThemeMode = onSetThemeMode,
-                modifier = modifier
-            )
-        }
+    AnimatedContent(
+        targetState = subScreen,
+        transitionSpec = {
+            val enteringChild = targetState != SettingsSubScreen.ROOT
+            (slideInHorizontally(
+                animationSpec = FreedomMotion.FluidIntOffsetSpring,
+                initialOffsetX = { if (enteringChild) it / 5 else -it / 6 }
+            ) + fadeIn(tween(220))) togetherWith (slideOutHorizontally(
+                animationSpec = FreedomMotion.FluidIntOffsetSpring,
+                targetOffsetX = { if (enteringChild) -it / 6 else it / 5 }
+            ) + fadeOut(tween(160)))
+        },
+        label = "settings_subscreen"
+    ) { active ->
+        when (active) {
+            SettingsSubScreen.ROOT -> {
+                SettingsRootView(
+                    uiState = uiState,
+                    onOpenBlockingSettings = { subScreen = SettingsSubScreen.BLOCKING_SETTINGS },
+                    onOpenFilterUpdates = { subScreen = SettingsSubScreen.FILTER_UPDATES },
+                    onOpenAbout = { subScreen = SettingsSubScreen.ABOUT },
+                    onSetThemeMode = onSetThemeMode,
+                    modifier = modifier
+                )
+            }
 
-        SettingsSubScreen.BLOCKING_SETTINGS -> {
-            BackHandler { subScreen = SettingsSubScreen.ROOT }
-            BlockingSettingsView(
-                uiState = uiState,
-                permissionChecker = permissionChecker,
-                onRefreshPermissions = onRefreshPermissions,
-                onSetLockedModeDefault = onSetLockedModeDefault,
-                onSetDndEnabled = onSetDndEnabled,
-                onSetDndMode = onSetDndMode,
-                onSetHideNotifications = onSetHideNotifications,
-                onBack = { subScreen = SettingsSubScreen.ROOT },
-                modifier = modifier
-            )
-        }
+            SettingsSubScreen.BLOCKING_SETTINGS -> {
+                BackHandler { subScreen = SettingsSubScreen.ROOT }
+                BlockingSettingsView(
+                    uiState = uiState,
+                    permissionChecker = permissionChecker,
+                    onRefreshPermissions = onRefreshPermissions,
+                    onSetLockedModeDefault = onSetLockedModeDefault,
+                    onSetDndEnabled = onSetDndEnabled,
+                    onSetDndMode = onSetDndMode,
+                    onSetHideNotifications = onSetHideNotifications,
+                    onBack = { subScreen = SettingsSubScreen.ROOT },
+                    modifier = modifier
+                )
+            }
 
-        SettingsSubScreen.FILTER_UPDATES -> {
-            BackHandler { subScreen = SettingsSubScreen.ROOT }
-            FilterUpdatesView(
-                uiState = uiState,
-                onSetAutoDetectUnknownSites = onSetAutoDetectUnknownSites,
-                onSetFilterFrequency = onSetFilterFrequency,
-                onUpdateFiltersNow = onUpdateFiltersNow,
-                onBack = { subScreen = SettingsSubScreen.ROOT },
-                modifier = modifier
-            )
-        }
+            SettingsSubScreen.FILTER_UPDATES -> {
+                BackHandler { subScreen = SettingsSubScreen.ROOT }
+                FilterUpdatesView(
+                    uiState = uiState,
+                    onSetAutoDetectUnknownSites = onSetAutoDetectUnknownSites,
+                    onSetFilterFrequency = onSetFilterFrequency,
+                    onUpdateFiltersNow = onUpdateFiltersNow,
+                    onBack = { subScreen = SettingsSubScreen.ROOT },
+                    modifier = modifier
+                )
+            }
 
-        SettingsSubScreen.ABOUT -> {
-            BackHandler { subScreen = SettingsSubScreen.ROOT }
-            AboutAndLimitationsView(
-                onBack = { subScreen = SettingsSubScreen.ROOT },
-                modifier = modifier
-            )
+            SettingsSubScreen.ABOUT -> {
+                BackHandler { subScreen = SettingsSubScreen.ROOT }
+                AboutAndLimitationsView(
+                    onBack = { subScreen = SettingsSubScreen.ROOT },
+                    modifier = modifier
+                )
+            }
         }
     }
 }
@@ -489,8 +512,8 @@ private fun BlockingSettingsView(
                         )
                         GlassDivider()
                         PermissionRowItem(
-                            title = "Session Countdown Notification",
-                            subtitle = "Displays active shield timer while blocking",
+                            title = "Block Alerts & Session Notifications",
+                            subtitle = "Shows the 'Blocked by Freedom' notification banner and live focus timer",
                             granted = perms?.notificationsGranted == true,
                             onClick = {
                                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {

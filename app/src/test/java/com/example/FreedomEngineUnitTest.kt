@@ -9,6 +9,7 @@ import com.example.domain.SettingsWaitStateMachine
 import com.example.domain.StrictModePolicy
 import com.example.domain.UnknownSiteClassifier
 import com.example.domain.WebsiteCategory
+import com.example.ui.theme.DurationWheelBounds
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -510,5 +511,55 @@ class FreedomEngineUnitTest {
         assertTrue(
             StrictModePolicy.canModifyOrDisableSchedule(6L, 5L, true) is StrictModePolicy.GuardResult.Permitted
         )
+    }
+
+    // ---------------------------------------------------------
+    // 8. 0-24H Rotary Wheel Clamping & Vivo Small/Mini Window Flagging
+    // ---------------------------------------------------------
+
+    @Test
+    fun durationWheelBounds_supportsMinuteByMinuteUpTo24Hours() {
+        assertEquals(1, DurationWheelBounds.clampDuration(0, 0))
+        assertEquals(6, DurationWheelBounds.clampDuration(0, 6))
+        assertEquals(1439, DurationWheelBounds.clampDuration(23, 59))
+        assertEquals(1440, DurationWheelBounds.clampDuration(24, 0))
+        assertEquals(1440, DurationWheelBounds.clampDuration(24, 45))
+        assertEquals(14 to 37, DurationWheelBounds.splitDuration(14 * 60 + 37))
+    }
+
+    @Test
+    fun decisionEngine_flagsFloatingSmallAndMiniWindowsForDedicatedTeardown() {
+        val snap = BlockDecisionEngine.ActiveBlockSnapshot(
+            isActive = true,
+            sessionId = 9L,
+            label = "Study",
+            endWallTimeMs = 200_000L,
+            endElapsedRealtimeMs = 150_000L,
+            strictMode = true,
+            allowedPackages = setOf("com.example.notes")
+        )
+
+        val windows = listOf(
+            BlockDecisionEngine.ObservedWindow(packageName = "com.example.notes"),
+            BlockDecisionEngine.ObservedWindow(
+                packageName = "com.instagram.android",
+                isFloatingWindow = true
+            )
+        )
+
+        val decision = BlockDecisionEngine.evaluateWindows(
+            windows = windows,
+            snapshot = snap,
+            domainIndex = domainIndex,
+            ownPackageName = ownPkg,
+            dynamicExemptPackages = launcherExempt,
+            nowWallMs = 100_000L,
+            nowElapsedRealtimeMs = 50_000L
+        )
+        assertTrue(decision is BlockDecisionEngine.Decision.BlockApp)
+        val blockApp = decision as BlockDecisionEngine.Decision.BlockApp
+        assertEquals("com.instagram.android", blockApp.packageName)
+        assertTrue(blockApp.isFloatingWindow)
+        assertTrue(blockApp.isMultiWindowOrPip)
     }
 }

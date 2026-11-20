@@ -1,8 +1,20 @@
 package com.example.ui.screens
 
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -24,12 +36,10 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Lock
-import androidx.compose.material.icons.rounded.Remove
 import androidx.compose.material.icons.rounded.Shield
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -37,14 +47,12 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -52,7 +60,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -62,7 +72,11 @@ import com.example.data.local.ScheduleEntity
 import com.example.domain.ScheduleCalculator
 import com.example.domain.WebsiteCategory
 import com.example.ui.FreedomUiState
+import com.example.ui.theme.ClockTimeWheelPicker
+import com.example.ui.theme.DurationWheelBounds
+import com.example.ui.theme.DurationWheelPicker
 import com.example.ui.theme.FreedomGlass
+import com.example.ui.theme.FreedomMotion
 import com.example.ui.theme.FreedomSwitch
 import com.example.ui.theme.GlassCard
 import com.example.ui.theme.GlassDivider
@@ -70,6 +84,8 @@ import com.example.ui.theme.GlassGroupedRow
 import com.example.ui.theme.GlassPillButton
 import com.example.ui.theme.GlassSegmentedControl
 import com.example.ui.theme.JetBrainsMono
+import com.example.ui.theme.colorOsPressScale
+import com.example.ui.theme.rememberFreedomHaptics
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -93,10 +109,11 @@ private val DURATION_PRESETS = listOf(
 )
 
 /**
- * Clean 3-mode Sessions screen inspired directly by the reference screenshot:
- *   NOW | LATER | RECURRING
- * with Name row, Blocklists picker, Locked Mode toggle, LENGTH | END TIME card,
- * and sticky bottom CTA.
+ * Clean 3-mode Sessions screen with ColorOS fluid transitions and minute-by-minute
+ * 3D rotary wheel time pickers everywhere time is selected:
+ *   - NOW (Length presets + inline 0–24h Custom Duration Wheel / End Time Clock Wheel)
+ *   - LATER (Start Time Clock Wheel + presets or inline 0–24h Custom Duration Wheel)
+ *   - RECURRING (Starts & Ends Clock Wheel inside schedule editor)
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -129,7 +146,7 @@ fun SessionsScreen(
     var useEndTimeMode by remember { mutableStateOf(false) }
     var endTimeMinuteOfDay by remember {
         val cal = Calendar.getInstance().apply { add(Calendar.MINUTE, 60) }
-        mutableIntStateOf((cal.get(Calendar.HOUR_OF_DAY) * 60 + (cal.get(Calendar.MINUTE) / 5) * 5) % 1440)
+        mutableIntStateOf((cal.get(Calendar.HOUR_OF_DAY) * 60 + cal.get(Calendar.MINUTE)) % 1440)
     }
     var sessionName by remember { mutableStateOf("$dayOfWeekName 25m Session") }
     var customNameEdited by remember { mutableStateOf(false) }
@@ -140,9 +157,10 @@ fun SessionsScreen(
     var laterTomorrow by remember { mutableStateOf(false) }
     var laterStartMinute by remember {
         val cal = Calendar.getInstance().apply { add(Calendar.MINUTE, 30) }
-        mutableIntStateOf(((cal.get(Calendar.HOUR_OF_DAY) * 60 + cal.get(Calendar.MINUTE) + 4) / 5 * 5) % 1440)
+        mutableIntStateOf((cal.get(Calendar.HOUR_OF_DAY) * 60 + cal.get(Calendar.MINUTE)) % 1440)
     }
     var laterDurationMinutes by remember { mutableIntStateOf(60) }
+    var laterCustomDurationMode by remember { mutableStateOf(false) }
     var laterStrictMode by remember(uiState.lockedModeDefault) { mutableStateOf(uiState.lockedModeDefault) }
 
     // RECURRING tab dialog state
@@ -150,23 +168,29 @@ fun SessionsScreen(
 
     fun updateDefaultSessionName(minutes: Int) {
         if (!customNameEdited) {
-            val tag = if (minutes >= 60 && minutes % 60 == 0) "${minutes / 60}h" else "${minutes}m"
+            val h = minutes / 60
+            val m = minutes % 60
+            val tag = when {
+                h > 0 && m > 0 -> "${h}h ${m}m"
+                h > 0 -> "${h}h"
+                else -> "${m}m"
+            }
             sessionName = "$dayOfWeekName $tag Session"
         }
     }
 
     fun computeNowDurationMinutes(): Int {
-        if (!useEndTimeMode) return selectedMinutes
+        if (!useEndTimeMode) return selectedMinutes.coerceIn(DurationWheelBounds.MIN_MINUTES, DurationWheelBounds.MAX_MINUTES)
         val cal = Calendar.getInstance()
         val nowMinute = cal.get(Calendar.HOUR_OF_DAY) * 60 + cal.get(Calendar.MINUTE)
         var diff = endTimeMinuteOfDay - nowMinute
         if (diff <= 0) diff += 1440
-        return diff.coerceIn(5, 1440)
+        return diff.coerceIn(DurationWheelBounds.MIN_MINUTES, DurationWheelBounds.MAX_MINUTES)
     }
 
     Box(modifier = modifier.fillMaxSize()) {
         Column(modifier = Modifier.fillMaxSize()) {
-            // Centered top title + 3-way segmented pill
+            // Centered top title + ColorOS fluid sliding 3-way segmented pill
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -187,419 +211,470 @@ fun SessionsScreen(
                 )
             }
 
-            // Tab body
-            when (activeTab) {
-                SessionTabMode.NOW -> {
-                    LazyColumn(
-                        modifier = Modifier.weight(1f),
-                        contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 4.dp, bottom = 104.dp),
-                        verticalArrangement = Arrangement.spacedBy(16.dp)
-                    ) {
-                        // Name glass card (inline editable matching Screenshot 1)
-                        item {
-                            GlassCard(contentPadding = PaddingValues(horizontal = 18.dp, vertical = 16.dp)) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.SpaceBetween
-                                ) {
-                                    Text(
-                                        text = "Name",
-                                        style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.SemiBold),
-                                        color = g.textPrimary
-                                    )
-                                    Spacer(Modifier.width(12.dp))
-                                    BasicTextField(
-                                        value = sessionName,
-                                        onValueChange = {
-                                            sessionName = it
-                                            customNameEdited = true
-                                        },
-                                        singleLine = true,
-                                        textStyle = MaterialTheme.typography.bodyLarge.copy(
-                                            color = g.primaryAccent,
-                                            fontWeight = FontWeight.Medium,
-                                            textAlign = TextAlign.End
-                                        ),
-                                        cursorBrush = SolidColor(g.primaryAccent),
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .testTag("session_name_input")
-                                    )
-                                }
-                            }
-                        }
-
-                        // Blocklist & Locked Mode grouped card
-                        item {
-                            GlassCard(contentPadding = PaddingValues(vertical = 2.dp)) {
-                                GlassGroupedRow(
-                                    title = "Blocklist",
-                                    leadingIcon = Icons.Rounded.Shield,
-                                    trailingText = selectedBlocklist?.name ?: "Choose",
-                                    onClick = { showBlocklistSheet = true },
-                                    modifier = Modifier.testTag("session_blocklist_row")
-                                )
-                                GlassDivider()
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(horizontal = 18.dp, vertical = 12.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.Lock,
-                                        contentDescription = null,
-                                        tint = if (strictMode) g.lockedAmber else g.textSecondary,
-                                        modifier = Modifier.size(22.dp)
-                                    )
-                                    Spacer(Modifier.width(14.dp))
-                                    Column(modifier = Modifier.weight(1f)) {
+            // Seamless directional spring transition between NOW | LATER | RECURRING
+            AnimatedContent(
+                targetState = activeTab,
+                modifier = Modifier.weight(1f),
+                transitionSpec = {
+                    val forward = targetState.ordinal >= initialState.ordinal
+                    (slideInHorizontally(
+                        animationSpec = FreedomMotion.FluidIntOffsetSpring,
+                        initialOffsetX = { if (forward) it / 8 else -it / 8 }
+                    ) + fadeIn(tween(200))) togetherWith (slideOutHorizontally(
+                        animationSpec = FreedomMotion.FluidIntOffsetSpring,
+                        targetOffsetX = { if (forward) -it / 10 else it / 10 }
+                    ) + fadeOut(tween(150)))
+                },
+                label = "sessions_subtab_content"
+            ) { tabMode ->
+                when (tabMode) {
+                    SessionTabMode.NOW -> {
+                        LazyColumn(
+                            modifier = Modifier.fillMaxSize(),
+                            contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 4.dp, bottom = 104.dp),
+                            verticalArrangement = Arrangement.spacedBy(16.dp)
+                        ) {
+                            // Name glass card
+                            item {
+                                GlassCard(contentPadding = PaddingValues(horizontal = 18.dp, vertical = 16.dp)) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
                                         Text(
-                                            text = "Locked Mode",
+                                            text = "Name",
                                             style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.SemiBold),
                                             color = g.textPrimary
                                         )
-                                        Text(
-                                            text = "Cannot stop early; Settings requires 5-min wait",
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = g.textSecondary
-                                        )
-                                    }
-                                    FreedomSwitch(
-                                        checked = strictMode,
-                                        onCheckedChange = { strictMode = it },
-                                        modifier = Modifier.testTag("session_locked_mode_switch")
-                                    )
-                                }
-                            }
-                        }
-
-                        // Duration / End Time glass card (matching Screenshot 1!)
-                        item {
-                            GlassCard(contentPadding = PaddingValues(16.dp)) {
-                                GlassSegmentedControl(
-                                    options = listOf("Length", "End Time"),
-                                    selectedIndex = if (useEndTimeMode) 1 else 0,
-                                    onSelect = { useEndTimeMode = (it == 1) },
-                                    testTagPrefix = "duration_mode"
-                                )
-                                Spacer(Modifier.height(18.dp))
-
-                                if (!useEndTimeMode) {
-                                    FlowRow(
-                                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                                        verticalArrangement = Arrangement.spacedBy(10.dp)
-                                    ) {
-                                        DURATION_PRESETS.forEach { preset ->
-                                            val isSelected = !customMode && selectedMinutes == preset.minutes
-                                            DurationPillChip(
-                                                label = preset.label,
-                                                selected = isSelected,
-                                                onClick = {
-                                                    customMode = false
-                                                    selectedMinutes = preset.minutes
-                                                    updateDefaultSessionName(preset.minutes)
-                                                },
-                                                testTag = "duration_preset_${preset.minutes}"
-                                            )
-                                        }
-                                        DurationPillChip(
-                                            label = if (customMode) "${selectedMinutes}m" else "CUSTOM",
-                                            selected = customMode,
-                                            leadingIcon = Icons.Rounded.Edit,
-                                            onClick = { customMode = true },
-                                            testTag = "duration_preset_custom"
-                                        )
-                                    }
-
-                                    if (customMode) {
-                                        Spacer(Modifier.height(16.dp))
-                                        Row(
-                                            modifier = Modifier.fillMaxWidth(),
-                                            horizontalArrangement = Arrangement.SpaceBetween,
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Text(
-                                                text = "Custom length",
-                                                style = MaterialTheme.typography.bodyMedium,
-                                                color = g.textSecondary
-                                            )
-                                            Text(
-                                                text = formatMinutesHuman(selectedMinutes),
-                                                style = MaterialTheme.typography.titleMedium.copy(
-                                                    fontFamily = JetBrainsMono,
-                                                    fontWeight = FontWeight.Bold
-                                                ),
-                                                color = g.primaryAccent
-                                            )
-                                        }
-                                        Slider(
-                                            value = selectedMinutes.coerceIn(5, 480).toFloat(),
+                                        Spacer(Modifier.width(12.dp))
+                                        BasicTextField(
+                                            value = sessionName,
                                             onValueChange = {
-                                                selectedMinutes = (it.toInt() / 5) * 5
-                                                updateDefaultSessionName(selectedMinutes)
+                                                sessionName = it
+                                                customNameEdited = true
                                             },
-                                            valueRange = 5f..480f,
-                                            colors = SliderDefaults.colors(
-                                                thumbColor = g.primaryAccent,
-                                                activeTrackColor = g.primaryAccent,
-                                                inactiveTrackColor = g.divider
-                                            )
-                                        )
-                                    }
-                                } else {
-                                    // End Time stepper
-                                    Column(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalAlignment = Alignment.CenterHorizontally
-                                    ) {
-                                        Text(
-                                            text = "Focus ends at",
-                                            style = MaterialTheme.typography.bodyMedium,
-                                            color = g.textSecondary
-                                        )
-                                        Spacer(Modifier.height(10.dp))
-                                        TimeStepperRow(
-                                            minuteOfDay = endTimeMinuteOfDay,
-                                            onChange = { endTimeMinuteOfDay = it }
-                                        )
-                                        Spacer(Modifier.height(8.dp))
-                                        Text(
-                                            text = "Total duration: ${formatMinutesHuman(computeNowDurationMinutes())}",
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = g.primaryAccent
+                                            singleLine = true,
+                                            textStyle = MaterialTheme.typography.bodyLarge.copy(
+                                                color = g.primaryAccent,
+                                                fontWeight = FontWeight.Medium,
+                                                textAlign = TextAlign.End
+                                            ),
+                                            cursorBrush = SolidColor(g.primaryAccent),
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .testTag("session_name_input")
                                         )
                                     }
                                 }
                             }
-                        }
-                    }
-                }
 
-                SessionTabMode.LATER -> {
-                    val laterSchedules = uiState.schedules.filter { !it.isRecurring }
-                    LazyColumn(
-                        modifier = Modifier.weight(1f),
-                        contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 4.dp, bottom = 104.dp),
-                        verticalArrangement = Arrangement.spacedBy(16.dp)
-                    ) {
-                        item {
-                            GlassCard(contentPadding = PaddingValues(horizontal = 18.dp, vertical = 16.dp)) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text(
-                                        text = "Name",
-                                        style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.SemiBold),
-                                        color = g.textPrimary
-                                    )
-                                    Spacer(Modifier.width(12.dp))
-                                    BasicTextField(
-                                        value = laterName,
-                                        onValueChange = { laterName = it },
-                                        singleLine = true,
-                                        textStyle = MaterialTheme.typography.bodyLarge.copy(
-                                            color = g.primaryAccent,
-                                            fontWeight = FontWeight.Medium,
-                                            textAlign = TextAlign.End
-                                        ),
-                                        cursorBrush = SolidColor(g.primaryAccent),
-                                        modifier = Modifier.weight(1f)
-                                    )
-                                }
-                            }
-                        }
-
-                        item {
-                            GlassCard(contentPadding = PaddingValues(vertical = 2.dp)) {
-                                GlassGroupedRow(
-                                    title = "Blocklist",
-                                    leadingIcon = Icons.Rounded.Shield,
-                                    trailingText = selectedBlocklist?.name ?: "Choose",
-                                    onClick = { showBlocklistSheet = true }
-                                )
-                                GlassDivider()
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(horizontal = 18.dp, vertical = 12.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.Lock,
-                                        contentDescription = null,
-                                        tint = if (laterStrictMode) g.lockedAmber else g.textSecondary,
-                                        modifier = Modifier.size(22.dp)
-                                    )
-                                    Spacer(Modifier.width(14.dp))
-                                    Text(
-                                        text = "Locked Mode",
-                                        style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.SemiBold),
-                                        color = g.textPrimary,
-                                        modifier = Modifier.weight(1f)
-                                    )
-                                    FreedomSwitch(
-                                        checked = laterStrictMode,
-                                        onCheckedChange = { laterStrictMode = it }
-                                    )
-                                }
-                            }
-                        }
-
-                        item {
-                            GlassCard(contentPadding = PaddingValues(18.dp)) {
-                                GlassSegmentedControl(
-                                    options = listOf("Today", "Tomorrow"),
-                                    selectedIndex = if (laterTomorrow) 1 else 0,
-                                    onSelect = { laterTomorrow = (it == 1) },
-                                    testTagPrefix = "later_day"
-                                )
-                                Spacer(Modifier.height(16.dp))
-                                Text(
-                                    text = "Start Time",
-                                    style = MaterialTheme.typography.labelLarge,
-                                    color = g.textSecondary
-                                )
-                                Spacer(Modifier.height(8.dp))
-                                TimeStepperRow(
-                                    minuteOfDay = laterStartMinute,
-                                    onChange = { laterStartMinute = it }
-                                )
-                                Spacer(Modifier.height(16.dp))
-                                Text(
-                                    text = "Duration",
-                                    style = MaterialTheme.typography.labelLarge,
-                                    color = g.textSecondary
-                                )
-                                Spacer(Modifier.height(10.dp))
-                                FlowRow(
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    listOf(25, 45, 60, 120, 180).forEach { mins ->
-                                        DurationPillChip(
-                                            label = formatMinutesHuman(mins).uppercase(),
-                                            selected = laterDurationMinutes == mins,
-                                            onClick = { laterDurationMinutes = mins }
-                                        )
-                                    }
-                                }
-                            }
-                        }
-
-                        if (laterSchedules.isNotEmpty()) {
+                            // Blocklist & Locked Mode grouped card
                             item {
-                                Text(
-                                    text = "Upcoming One-Time Sessions",
-                                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                                    color = g.textPrimary
-                                )
-                            }
-                            items(laterSchedules, key = { it.id }) { sched ->
-                                val fmt = remember { SimpleDateFormat("EEE, MMM d · h:mm a", Locale.getDefault()) }
-                                GlassCard(contentPadding = PaddingValues(16.dp)) {
+                                GlassCard(contentPadding = PaddingValues(vertical = 2.dp)) {
+                                    GlassGroupedRow(
+                                        title = "Blocklist",
+                                        leadingIcon = Icons.Rounded.Shield,
+                                        trailingText = selectedBlocklist?.name ?: "Choose",
+                                        onClick = { showBlocklistSheet = true },
+                                        modifier = Modifier.testTag("session_blocklist_row")
+                                    )
+                                    GlassDivider()
                                     Row(
-                                        modifier = Modifier.fillMaxWidth(),
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 18.dp, vertical = 12.dp),
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.Lock,
+                                            contentDescription = null,
+                                            tint = if (strictMode) g.lockedAmber else g.textSecondary,
+                                            modifier = Modifier.size(22.dp)
+                                        )
+                                        Spacer(Modifier.width(14.dp))
                                         Column(modifier = Modifier.weight(1f)) {
                                             Text(
-                                                text = sched.name,
+                                                text = "Locked Mode",
                                                 style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.SemiBold),
                                                 color = g.textPrimary
                                             )
                                             Text(
-                                                text = fmt.format(Date(sched.oneTimeStartMs)),
-                                                style = MaterialTheme.typography.bodySmall,
-                                                color = g.textSecondary
-                                            )
-                                        }
-                                        IconButton(onClick = { onDeleteSchedule(sched) }) {
-                                            Icon(
-                                                imageVector = Icons.Rounded.DeleteOutline,
-                                                contentDescription = "Delete",
-                                                tint = g.textSecondary
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                SessionTabMode.RECURRING -> {
-                    val recurringList = uiState.schedules.filter { it.isRecurring }
-                    LazyColumn(
-                        modifier = Modifier.weight(1f),
-                        contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 4.dp, bottom = 104.dp),
-                        verticalArrangement = Arrangement.spacedBy(14.dp)
-                    ) {
-                        if (recurringList.isEmpty()) {
-                            item {
-                                GlassCard(contentPadding = PaddingValues(24.dp)) {
-                                    Text(
-                                        text = "No Recurring Schedules",
-                                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                                        color = g.textPrimary
-                                    )
-                                    Spacer(Modifier.height(6.dp))
-                                    Text(
-                                        text = "Automate daily, weekday, or overnight focus blocks so Freedom activates on schedule without effort.",
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        color = g.textSecondary
-                                    )
-                                }
-                            }
-                        } else {
-                            items(recurringList, key = { it.id }) { sched ->
-                                val profileName = uiState.blocklists.firstOrNull { it.id == sched.blocklistId }?.name ?: "Blocklist"
-                                GlassCard(
-                                    contentPadding = PaddingValues(18.dp),
-                                    onClick = { editingRecurring = sched }
-                                ) {
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Column(modifier = Modifier.weight(1f)) {
-                                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                                if (sched.strictMode) {
-                                                    Icon(
-                                                        imageVector = Icons.Rounded.Lock,
-                                                        contentDescription = null,
-                                                        tint = g.lockedAmber,
-                                                        modifier = Modifier.size(16.dp)
-                                                    )
-                                                    Spacer(Modifier.width(6.dp))
-                                                }
-                                                Text(
-                                                    text = sched.name,
-                                                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                                                    color = g.textPrimary
-                                                )
-                                            }
-                                            Spacer(Modifier.height(4.dp))
-                                            Text(
-                                                text = "${ScheduleCalculator.formatMinuteOfDay(sched.startMinuteOfDay)} – " +
-                                                    "${ScheduleCalculator.formatMinuteOfDay(sched.endMinuteOfDay)} · " +
-                                                    ScheduleCalculator.formatDaysSummary(sched.daysMask),
-                                                style = MaterialTheme.typography.bodyMedium.copy(fontFamily = JetBrainsMono),
-                                                color = g.primaryAccent
-                                            )
-                                            Spacer(Modifier.height(2.dp))
-                                            Text(
-                                                text = profileName,
+                                                text = "Cannot stop early; Settings requires 5-min wait",
                                                 style = MaterialTheme.typography.bodySmall,
                                                 color = g.textSecondary
                                             )
                                         }
                                         FreedomSwitch(
-                                            checked = sched.enabled,
-                                            onCheckedChange = { onToggleSchedule(sched, it) }
+                                            checked = strictMode,
+                                            onCheckedChange = { strictMode = it },
+                                            modifier = Modifier.testTag("session_locked_mode_switch")
                                         )
+                                    }
+                                }
+                            }
+
+                            // Duration / End Time glass card with 3D Rotary Wheel Picker (Screenshot 1!)
+                            item {
+                                GlassCard(
+                                    contentPadding = PaddingValues(16.dp),
+                                    animateSize = true
+                                ) {
+                                    GlassSegmentedControl(
+                                        options = listOf("Length", "End Time"),
+                                        selectedIndex = if (useEndTimeMode) 1 else 0,
+                                        onSelect = { useEndTimeMode = (it == 1) },
+                                        testTagPrefix = "duration_mode"
+                                    )
+                                    Spacer(Modifier.height(18.dp))
+
+                                    AnimatedContent(
+                                        targetState = useEndTimeMode,
+                                        transitionSpec = {
+                                            (fadeIn(tween(200)) + slideInHorizontally(
+                                                animationSpec = FreedomMotion.FluidIntOffsetSpring,
+                                                initialOffsetX = { if (targetState) it / 10 else -it / 10 }
+                                            )) togetherWith (fadeOut(tween(150)) + slideOutHorizontally(
+                                                animationSpec = FreedomMotion.FluidIntOffsetSpring,
+                                                targetOffsetX = { if (targetState) -it / 12 else it / 12 }
+                                            ))
+                                        },
+                                        label = "length_vs_endtime"
+                                    ) { endMode ->
+                                        if (!endMode) {
+                                            Column {
+                                                FlowRow(
+                                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                                                ) {
+                                                    DURATION_PRESETS.forEach { preset ->
+                                                        val isSelected = !customMode && selectedMinutes == preset.minutes
+                                                        DurationPillChip(
+                                                            label = preset.label,
+                                                            selected = isSelected,
+                                                            onClick = {
+                                                                customMode = false
+                                                                selectedMinutes = preset.minutes
+                                                                updateDefaultSessionName(preset.minutes)
+                                                            },
+                                                            testTag = "duration_preset_${preset.minutes}"
+                                                        )
+                                                    }
+                                                    DurationPillChip(
+                                                        label = if (customMode) formatMinutesCompact(selectedMinutes) else "CUSTOM",
+                                                        selected = customMode,
+                                                        leadingIcon = Icons.Rounded.Edit,
+                                                        onClick = { customMode = true },
+                                                        testTag = "duration_preset_custom"
+                                                    )
+                                                }
+
+                                                // Inline 3D 0-24H Minute-by-Minute Rotary Wheel matching Screenshot 1
+                                                AnimatedVisibility(
+                                                    visible = customMode,
+                                                    enter = expandVertically(FreedomMotion.FluidSizeSpring) + fadeIn(tween(220)),
+                                                    exit = shrinkVertically(FreedomMotion.FluidSizeSpring) + fadeOut(tween(160))
+                                                ) {
+                                                    Column(modifier = Modifier.fillMaxWidth()) {
+                                                        Spacer(Modifier.height(16.dp))
+                                                        DurationWheelPicker(
+                                                            totalMinutes = selectedMinutes,
+                                                            onMinutesChanged = { mins ->
+                                                                selectedMinutes = mins
+                                                                updateDefaultSessionName(mins)
+                                                            }
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        } else {
+                                            // End Time 3D Rotary Clock Wheel
+                                            Column(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                horizontalAlignment = Alignment.CenterHorizontally
+                                            ) {
+                                                Text(
+                                                    text = "Focus ends at",
+                                                    style = MaterialTheme.typography.bodyMedium,
+                                                    color = g.textSecondary
+                                                )
+                                                Spacer(Modifier.height(10.dp))
+                                                ClockTimeWheelPicker(
+                                                    minuteOfDay = endTimeMinuteOfDay,
+                                                    onMinuteOfDayChanged = { endTimeMinuteOfDay = it }
+                                                )
+                                                Spacer(Modifier.height(10.dp))
+                                                Text(
+                                                    text = "Total duration: ${formatMinutesHuman(computeNowDurationMinutes())}",
+                                                    style = MaterialTheme.typography.bodyMedium.copy(
+                                                        fontFamily = JetBrainsMono,
+                                                        fontWeight = FontWeight.SemiBold
+                                                    ),
+                                                    color = g.primaryAccent
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    SessionTabMode.LATER -> {
+                        val laterSchedules = uiState.schedules.filter { !it.isRecurring }
+                        LazyColumn(
+                            modifier = Modifier.fillMaxSize(),
+                            contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 4.dp, bottom = 104.dp),
+                            verticalArrangement = Arrangement.spacedBy(16.dp)
+                        ) {
+                            item {
+                                GlassCard(contentPadding = PaddingValues(horizontal = 18.dp, vertical = 16.dp)) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = "Name",
+                                            style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.SemiBold),
+                                            color = g.textPrimary
+                                        )
+                                        Spacer(Modifier.width(12.dp))
+                                        BasicTextField(
+                                            value = laterName,
+                                            onValueChange = { laterName = it },
+                                            singleLine = true,
+                                            textStyle = MaterialTheme.typography.bodyLarge.copy(
+                                                color = g.primaryAccent,
+                                                fontWeight = FontWeight.Medium,
+                                                textAlign = TextAlign.End
+                                            ),
+                                            cursorBrush = SolidColor(g.primaryAccent),
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                    }
+                                }
+                            }
+
+                            item {
+                                GlassCard(contentPadding = PaddingValues(vertical = 2.dp)) {
+                                    GlassGroupedRow(
+                                        title = "Blocklist",
+                                        leadingIcon = Icons.Rounded.Shield,
+                                        trailingText = selectedBlocklist?.name ?: "Choose",
+                                        onClick = { showBlocklistSheet = true }
+                                    )
+                                    GlassDivider()
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 18.dp, vertical = 12.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.Lock,
+                                            contentDescription = null,
+                                            tint = if (laterStrictMode) g.lockedAmber else g.textSecondary,
+                                            modifier = Modifier.size(22.dp)
+                                        )
+                                        Spacer(Modifier.width(14.dp))
+                                        Text(
+                                            text = "Locked Mode",
+                                            style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.SemiBold),
+                                            color = g.textPrimary,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        FreedomSwitch(
+                                            checked = laterStrictMode,
+                                            onCheckedChange = { laterStrictMode = it }
+                                        )
+                                    }
+                                }
+                            }
+
+                            item {
+                                GlassCard(
+                                    contentPadding = PaddingValues(18.dp),
+                                    animateSize = true
+                                ) {
+                                    GlassSegmentedControl(
+                                        options = listOf("Today", "Tomorrow"),
+                                        selectedIndex = if (laterTomorrow) 1 else 0,
+                                        onSelect = { laterTomorrow = (it == 1) },
+                                        testTagPrefix = "later_day"
+                                    )
+                                    Spacer(Modifier.height(16.dp))
+                                    Text(
+                                        text = "Start Time",
+                                        style = MaterialTheme.typography.labelLarge,
+                                        color = g.textSecondary
+                                    )
+                                    Spacer(Modifier.height(8.dp))
+                                    ClockTimeWheelPicker(
+                                        minuteOfDay = laterStartMinute,
+                                        onMinuteOfDayChanged = { laterStartMinute = it },
+                                        wheelHeight = 168.dp
+                                    )
+                                    Spacer(Modifier.height(16.dp))
+                                    Text(
+                                        text = "Duration",
+                                        style = MaterialTheme.typography.labelLarge,
+                                        color = g.textSecondary
+                                    )
+                                    Spacer(Modifier.height(10.dp))
+                                    FlowRow(
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        listOf(25, 45, 60, 120, 180).forEach { mins ->
+                                            DurationPillChip(
+                                                label = formatMinutesCompact(mins),
+                                                selected = !laterCustomDurationMode && laterDurationMinutes == mins,
+                                                onClick = {
+                                                    laterCustomDurationMode = false
+                                                    laterDurationMinutes = mins
+                                                }
+                                            )
+                                        }
+                                        DurationPillChip(
+                                            label = if (laterCustomDurationMode) {
+                                                formatMinutesCompact(laterDurationMinutes)
+                                            } else {
+                                                "CUSTOM"
+                                            },
+                                            selected = laterCustomDurationMode,
+                                            leadingIcon = Icons.Rounded.Edit,
+                                            onClick = { laterCustomDurationMode = true }
+                                        )
+                                    }
+                                    AnimatedVisibility(
+                                        visible = laterCustomDurationMode,
+                                        enter = expandVertically(FreedomMotion.FluidSizeSpring) + fadeIn(tween(220)),
+                                        exit = shrinkVertically(FreedomMotion.FluidSizeSpring) + fadeOut(tween(160))
+                                    ) {
+                                        Column {
+                                            Spacer(Modifier.height(14.dp))
+                                            DurationWheelPicker(
+                                                totalMinutes = laterDurationMinutes,
+                                                onMinutesChanged = { laterDurationMinutes = it },
+                                                wheelHeight = 176.dp
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            if (laterSchedules.isNotEmpty()) {
+                                item {
+                                    Text(
+                                        text = "Upcoming One-Time Sessions",
+                                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                                        color = g.textPrimary
+                                    )
+                                }
+                                items(laterSchedules, key = { it.id }) { sched ->
+                                    val fmt = remember { SimpleDateFormat("EEE, MMM d · h:mm a", Locale.getDefault()) }
+                                    GlassCard(contentPadding = PaddingValues(16.dp)) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(
+                                                    text = sched.name,
+                                                    style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.SemiBold),
+                                                    color = g.textPrimary
+                                                )
+                                                Text(
+                                                    text = fmt.format(Date(sched.oneTimeStartMs)),
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = g.textSecondary
+                                                )
+                                            }
+                                            IconButton(onClick = { onDeleteSchedule(sched) }) {
+                                                Icon(
+                                                    imageVector = Icons.Rounded.DeleteOutline,
+                                                    contentDescription = "Delete",
+                                                    tint = g.textSecondary
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    SessionTabMode.RECURRING -> {
+                        val recurringList = uiState.schedules.filter { it.isRecurring }
+                        LazyColumn(
+                            modifier = Modifier.fillMaxSize(),
+                            contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 4.dp, bottom = 104.dp),
+                            verticalArrangement = Arrangement.spacedBy(14.dp)
+                        ) {
+                            if (recurringList.isEmpty()) {
+                                item {
+                                    GlassCard(contentPadding = PaddingValues(24.dp)) {
+                                        Text(
+                                            text = "No Recurring Schedules",
+                                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                                            color = g.textPrimary
+                                        )
+                                        Spacer(Modifier.height(6.dp))
+                                        Text(
+                                            text = "Automate daily, weekday, or overnight focus blocks so Freedom activates on schedule without effort.",
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = g.textSecondary
+                                        )
+                                    }
+                                }
+                            } else {
+                                items(recurringList, key = { it.id }) { sched ->
+                                    val profileName = uiState.blocklists.firstOrNull { it.id == sched.blocklistId }?.name ?: "Blocklist"
+                                    GlassCard(
+                                        contentPadding = PaddingValues(18.dp),
+                                        onClick = { editingRecurring = sched }
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                    if (sched.strictMode) {
+                                                        Icon(
+                                                            imageVector = Icons.Rounded.Lock,
+                                                            contentDescription = null,
+                                                            tint = g.lockedAmber,
+                                                            modifier = Modifier.size(16.dp)
+                                                        )
+                                                        Spacer(Modifier.width(6.dp))
+                                                    }
+                                                    Text(
+                                                        text = sched.name,
+                                                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                                                        color = g.textPrimary
+                                                    )
+                                                }
+                                                Spacer(Modifier.height(4.dp))
+                                                Text(
+                                                    text = "${ScheduleCalculator.formatMinuteOfDay(sched.startMinuteOfDay)} – " +
+                                                        "${ScheduleCalculator.formatMinuteOfDay(sched.endMinuteOfDay)} · " +
+                                                        ScheduleCalculator.formatDaysSummary(sched.daysMask),
+                                                    style = MaterialTheme.typography.bodyMedium.copy(fontFamily = JetBrainsMono),
+                                                    color = g.primaryAccent
+                                                )
+                                                Spacer(Modifier.height(2.dp))
+                                                Text(
+                                                    text = profileName,
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = g.textSecondary
+                                                )
+                                            }
+                                            FreedomSwitch(
+                                                checked = sched.enabled,
+                                                onCheckedChange = { onToggleSchedule(sched, it) }
+                                            )
+                                        }
                                     }
                                 }
                             }
@@ -609,13 +684,13 @@ fun SessionsScreen(
             }
         }
 
-        // Sticky Bottom Primary Pill CTA matching Screenshot 1
+        // Sticky Bottom Primary Pill CTA
         Box(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
-                .background(g.navSurface.copy(alpha = 0.85f))
-                .padding(horizontal = 20.dp, vertical = 14.dp)
+                .background(g.bgBottom.copy(alpha = 0.84f))
+                .padding(horizontal = 20.dp, vertical = 12.dp)
         ) {
             when (activeTab) {
                 SessionTabMode.NOW -> {
@@ -720,8 +795,8 @@ fun SessionsScreen(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clip(RoundedCornerShape(14.dp))
-                            .background(if (isPicked) g.primarySoft else androidx.compose.ui.graphics.Color.Transparent)
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(if (isPicked) g.primarySoft else Color.Transparent)
                             .clickable {
                                 selectedBlocklistId = profile.id
                                 showBlocklistSheet = false
@@ -761,7 +836,7 @@ fun SessionsScreen(
         }
     }
 
-    // Recurring Schedule Editor Dialog
+    // Recurring Schedule Editor Dialog (using smooth Rotary Clock Wheel!)
     editingRecurring?.let { initial ->
         RecurringScheduleEditorDialog(
             initial = initial,
@@ -786,18 +861,45 @@ private fun DurationPillChip(
     label: String,
     selected: Boolean,
     onClick: () -> Unit,
-    leadingIcon: androidx.compose.ui.graphics.vector.ImageVector? = null,
+    leadingIcon: ImageVector? = null,
     testTag: String? = null
 ) {
     val g = FreedomGlass.colors
+    val haptics = rememberFreedomHaptics()
+    val interactionSource = remember { MutableInteractionSource() }
     val shape = RoundedCornerShape(50)
+
+    val bgColor by animateColorAsState(
+        targetValue = if (selected) g.primaryAccent else g.glassSurfaceElevated,
+        animationSpec = tween(180),
+        label = "chip_bg"
+    )
+    val contentColor by animateColorAsState(
+        targetValue = if (selected) g.onPrimaryAccent else g.primaryAccent,
+        animationSpec = tween(180),
+        label = "chip_fg"
+    )
+    val borderColor by animateColorAsState(
+        targetValue = if (selected) g.primaryAccent else g.glassBorder,
+        animationSpec = tween(180),
+        label = "chip_border"
+    )
+
     Row(
         modifier = Modifier
             .heightIn(min = 44.dp)
+            .colorOsPressScale(interactionSource, pressedScale = 0.94f)
             .clip(shape)
-            .background(if (selected) g.primaryAccent else g.glassSurfaceElevated)
-            .border(1.dp, if (selected) g.primaryAccent else g.glassBorder, shape)
-            .clickable(onClick = onClick)
+            .background(bgColor)
+            .border(1.dp, borderColor, shape)
+            .clickable(
+                interactionSource = interactionSource,
+                indication = androidx.compose.material3.ripple(),
+                onClick = {
+                    haptics.tap()
+                    onClick()
+                }
+            )
             .padding(horizontal = 18.dp, vertical = 10.dp)
             .let { if (testTag != null) it.testTag(testTag) else it },
         verticalAlignment = Alignment.CenterVertically
@@ -806,7 +908,7 @@ private fun DurationPillChip(
             Icon(
                 imageVector = leadingIcon,
                 contentDescription = null,
-                tint = if (selected) g.onPrimaryAccent else g.primaryAccent,
+                tint = contentColor,
                 modifier = Modifier.size(16.dp)
             )
             Spacer(Modifier.width(6.dp))
@@ -814,47 +916,8 @@ private fun DurationPillChip(
         Text(
             text = label,
             style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
-            color = if (selected) g.onPrimaryAccent else g.primaryAccent
+            color = contentColor
         )
-    }
-}
-
-@Composable
-private fun TimeStepperRow(
-    minuteOfDay: Int,
-    onChange: (Int) -> Unit
-) {
-    val g = FreedomGlass.colors
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        IconButton(
-            onClick = { onChange((minuteOfDay - 15 + 1440) % 1440) },
-            modifier = Modifier
-                .size(44.dp)
-                .clip(CircleShape)
-                .background(g.primarySoft)
-        ) {
-            Icon(Icons.Rounded.Remove, contentDescription = "Earlier 15 minutes", tint = g.primaryAccent)
-        }
-        Text(
-            text = ScheduleCalculator.formatMinuteOfDay(minuteOfDay),
-            style = MaterialTheme.typography.headlineMedium.copy(
-                fontFamily = JetBrainsMono,
-                fontWeight = FontWeight.Bold
-            ),
-            color = g.textPrimary
-        )
-        IconButton(
-            onClick = { onChange((minuteOfDay + 15) % 1440) },
-            modifier = Modifier
-                .size(44.dp)
-                .clip(CircleShape)
-                .background(g.primarySoft)
-        ) {
-            Icon(Icons.Rounded.Add, contentDescription = "Later 15 minutes", tint = g.primaryAccent)
-        }
     }
 }
 
@@ -867,10 +930,12 @@ private fun RecurringScheduleEditorDialog(
     onSave: (ScheduleEntity) -> Unit
 ) {
     val g = FreedomGlass.colors
+    val haptics = rememberFreedomHaptics()
     var name by remember { mutableStateOf(initial.name) }
     var daysMask by remember { mutableIntStateOf(initial.daysMask) }
     var startMin by remember { mutableIntStateOf(initial.startMinuteOfDay) }
     var endMin by remember { mutableIntStateOf(initial.endMinuteOfDay) }
+    var editingEndWheel by remember { mutableStateOf(false) }
     var strict by remember { mutableStateOf(initial.strictMode) }
     var blocklistId by remember { mutableLongStateOf(initial.blocklistId) }
 
@@ -878,6 +943,7 @@ private fun RecurringScheduleEditorDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
+        shape = RoundedCornerShape(28.dp),
         containerColor = g.glassSurfaceElevated,
         title = {
             Text(
@@ -896,13 +962,13 @@ private fun RecurringScheduleEditorDialog(
                     cursorBrush = SolidColor(g.primaryAccent),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clip(RoundedCornerShape(12.dp))
+                        .clip(RoundedCornerShape(14.dp))
                         .background(g.glassSurface)
-                        .border(1.dp, g.glassBorder, RoundedCornerShape(12.dp))
+                        .border(1.dp, g.glassBorder, RoundedCornerShape(14.dp))
                         .padding(14.dp)
                 )
 
-                // Day-of-week pills
+                // Day-of-week pills with subtle haptics
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween
@@ -917,6 +983,7 @@ private fun RecurringScheduleEditorDialog(
                                 .background(if (active) g.primaryAccent else g.glassSurface)
                                 .border(1.dp, if (active) g.primaryAccent else g.glassBorder, CircleShape)
                                 .clickable {
+                                    haptics.tap()
                                     daysMask = if (active) daysMask and bit.inv() else daysMask or bit
                                 },
                             contentAlignment = Alignment.Center
@@ -930,22 +997,29 @@ private fun RecurringScheduleEditorDialog(
                     }
                 }
 
-                // Start & End time
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("Starts", color = g.textSecondary)
-                    TimeStepperRow(minuteOfDay = startMin, onChange = { startMin = it })
-                }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("Ends", color = g.textSecondary)
-                    TimeStepperRow(minuteOfDay = endMin, onChange = { endMin = it })
+                // Sliding Starts | Ends selector + Rotary Clock Wheel
+                GlassSegmentedControl(
+                    options = listOf(
+                        "Starts ${ScheduleCalculator.formatMinuteOfDay(startMin)}",
+                        "Ends ${ScheduleCalculator.formatMinuteOfDay(endMin)}"
+                    ),
+                    selectedIndex = if (editingEndWheel) 1 else 0,
+                    onSelect = { editingEndWheel = (it == 1) },
+                    testTagPrefix = "recurring_time_tab"
+                )
+
+                AnimatedContent(
+                    targetState = editingEndWheel,
+                    transitionSpec = { fadeIn(tween(180)) togetherWith fadeOut(tween(140)) },
+                    label = "recurring_wheel_switch"
+                ) { isEnd ->
+                    ClockTimeWheelPicker(
+                        minuteOfDay = if (isEnd) endMin else startMin,
+                        onMinuteOfDayChanged = { updated ->
+                            if (isEnd) endMin = updated else startMin = updated
+                        },
+                        wheelHeight = 154.dp
+                    )
                 }
 
                 // Blocklist selector cycle
@@ -954,9 +1028,10 @@ private fun RecurringScheduleEditorDialog(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clip(RoundedCornerShape(12.dp))
+                            .clip(RoundedCornerShape(14.dp))
                             .background(g.glassSurface)
                             .clickable {
+                                haptics.tap()
                                 val nextIdx = (blocklists.indexOfFirst { it.id == currentProfile.id } + 1) % blocklists.size
                                 blocklistId = blocklists[nextIdx].id
                             }
@@ -982,6 +1057,7 @@ private fun RecurringScheduleEditorDialog(
             TextButton(
                 onClick = {
                     if (daysMask != 0 && startMin != endMin) {
+                        haptics.tap()
                         onSave(
                             initial.copy(
                                 name = name.trim().ifEmpty { "Focus Schedule" },
@@ -1001,7 +1077,10 @@ private fun RecurringScheduleEditorDialog(
         dismissButton = {
             Row {
                 if (onDelete != null) {
-                    TextButton(onClick = onDelete) {
+                    TextButton(onClick = {
+                        haptics.tap()
+                        onDelete()
+                    }) {
                         Text("Delete", color = g.dangerCoral)
                     }
                 }
@@ -1011,6 +1090,16 @@ private fun RecurringScheduleEditorDialog(
             }
         }
     )
+}
+
+internal fun formatMinutesCompact(minutes: Int): String {
+    val h = minutes / 60
+    val m = minutes % 60
+    return when {
+        h > 0 && m > 0 -> "${h}H ${m}M"
+        h > 0 -> if (h == 1) "1 HR" else "$h HRS"
+        else -> "$m MIN"
+    }
 }
 
 internal fun formatMinutesHuman(minutes: Int): String {

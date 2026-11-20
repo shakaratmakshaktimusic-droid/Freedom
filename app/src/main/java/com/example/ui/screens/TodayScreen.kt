@@ -1,6 +1,12 @@
 package com.example.ui.screens
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -46,12 +52,15 @@ import com.example.blocker.FreedomMonitorService
 import com.example.domain.ScheduleCalculator
 import com.example.domain.WebsiteCategory
 import com.example.ui.FreedomUiState
+import androidx.compose.ui.graphics.graphicsLayer
 import com.example.ui.theme.FreedomGlass
+import com.example.ui.theme.FreedomMotion
 import com.example.ui.theme.FreedomSwitch
 import com.example.ui.theme.GlassCard
 import com.example.ui.theme.GlassDivider
 import com.example.ui.theme.GlassPillButton
 import com.example.ui.theme.JetBrainsMono
+import com.example.ui.theme.rememberFreedomHaptics
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -191,7 +200,11 @@ fun TodayScreen(
                     onToggle = { activeExpanded = !activeExpanded }
                 )
 
-                AnimatedVisibility(visible = activeExpanded) {
+                AnimatedVisibility(
+                    visible = activeExpanded,
+                    enter = expandVertically(FreedomMotion.FluidSizeSpring) + fadeIn(tween(200)),
+                    exit = shrinkVertically(FreedomMotion.FluidSizeSpring) + fadeOut(tween(150))
+                ) {
                     if (activeSession == null) {
                         GlassCard(contentPadding = PaddingValues(22.dp)) {
                             Text(
@@ -326,7 +339,11 @@ fun TodayScreen(
                     onToggle = { scheduledExpanded = !scheduledExpanded }
                 )
 
-                AnimatedVisibility(visible = scheduledExpanded) {
+                AnimatedVisibility(
+                    visible = scheduledExpanded,
+                    enter = expandVertically(FreedomMotion.FluidSizeSpring) + fadeIn(tween(200)),
+                    exit = shrinkVertically(FreedomMotion.FluidSizeSpring) + fadeOut(tween(150))
+                ) {
                     if (uiState.schedules.isEmpty()) {
                         GlassCard(contentPadding = PaddingValues(22.dp)) {
                             Text(
@@ -409,11 +426,20 @@ private fun CollapsibleSectionHeader(
     onToggle: () -> Unit
 ) {
     val g = FreedomGlass.colors
+    val haptics = rememberFreedomHaptics()
+    val chevronRotation by animateFloatAsState(
+        targetValue = if (expanded) 0f else -180f,
+        animationSpec = FreedomMotion.SnappyFloatSpring,
+        label = "section_chevron"
+    )
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .clickable(onClick = onToggle)
+            .clip(RoundedCornerShape(14.dp))
+            .clickable {
+                haptics.tap()
+                onToggle()
+            }
             .padding(vertical = 4.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
@@ -424,9 +450,10 @@ private fun CollapsibleSectionHeader(
             color = g.textPrimary
         )
         Icon(
-            imageVector = if (expanded) Icons.Rounded.KeyboardArrowDown else Icons.Rounded.KeyboardArrowUp,
+            imageVector = Icons.Rounded.KeyboardArrowDown,
             contentDescription = if (expanded) "Collapse $title" else "Expand $title",
-            tint = g.textSecondary
+            tint = g.textSecondary,
+            modifier = Modifier.graphicsLayer { rotationZ = chevronRotation }
         )
     }
 }

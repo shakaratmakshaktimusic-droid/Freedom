@@ -1,9 +1,13 @@
 package com.example.blocker
 
 import android.accessibilityservice.AccessibilityService
+import android.app.ActivityManager
+import android.content.Context
 import android.content.Intent
 import android.graphics.Rect
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
@@ -25,18 +29,24 @@ import kotlinx.coroutines.launch
  * Pure zero-VPN real-time blocking engine powered by Android AccessibilityService.
  *
  * Enforces:
- *  1. All-window multi-window / split-screen / floating pop-up / Picture-in-Picture scanning.
- *  2. Allowlist app blocking + Locked Mode hard-blocking of non-essential system apps & installers.
- *  3. Locked Mode 5-minute continuous emergency wait -> 3-minute auto-relock for Android Settings ONLY.
- *  4. Highest-precedence Website Allowlist (domain & URL path prefix exceptions).
- *  5. Zero-VPN Full Internet Browsing Block across browsers, Chrome Custom Tabs, & in-app WebViews.
- *  6. 16 hidden website categories via <0.01ms 64-bit CompactDomainIndex.
- *  7. Lightweight (<2ms) bounded UnknownSiteClassifier running once per newly navigated unknown URL,
- *     silently auto-learning newly discovered sites into hidden 64-bit hashes.
+ *  1. Non-intrusive Home eviction + multi-pass ActivityManager.killBackgroundProcesses() +
+ *     clean Freedom heads-up notification ("Blocked by Freedom. Do what matters.") for
+ *     normal blocked apps & websites (zero jarring full-screen flash).
+ *  2. Dedicated Vivo Small Window & Mini Window / OEM floating-window & PiP teardown:
+ *     detects both Small Windows and Mini Windows, clicks the OEM caption/close button
+ *     directly BEFORE Home (preventing Vivo from shrinking a Small Window into a lingering
+ *     Mini Window), kills background processes, and falls back to an impenetrable
+ *     TYPE_ACCESSIBILITY_OVERLAY shield if the OEM refuses programmatic dismissal.
+ *  3. Locked Mode 5-minute continuous Emergency Settings Waiting Room -> 3-minute unlock
+ *     (the ONLY case that opens the dedicated full-screen BlockOverlayActivity).
+ *  4. Highest-precedence Website Allowlist, Full Internet Browsing Block across browsers &
+ *     in-app WebViews, 16 hidden filter categories (<0.01ms CompactDomainIndex), and
+ *     lightweight (<2ms) UnknownSiteClassifier auto-learning.
  */
 class FreedomAccessibilityService : AccessibilityService() {
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val mainHandler = Handler(Looper.getMainLooper())
     private lateinit var overlayManager: FreedomOverlayManager
 
     @Volatile
@@ -51,11 +61,23 @@ class FreedomAccessibilityService : AccessibilityService() {
     @Volatile
     private var lastClassifiedUrlKey: String = ""
 
-    private var pipShieldActive: Boolean = false
+    @Volatile
+    private var persistentFloatingShieldActive: Boolean = false
+
+    @Volatile
+    private var consecutiveFloatingHits: Int = 0
+
+    @Volatile
+    private var lastFloatingPkg: String = ""
+
+    private val floatingWatchdogRunnable = Runnable {
+        recheckActiveWindowsNow()
+    }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
         overlayManager = FreedomOverlayManager(this)
+        FreedomBlockNotifier.ensureChannel(this)
         _isRunning.value = true
         instance = this
     }
@@ -90,10 +112,7 @@ class FreedomAccessibilityService : AccessibilityService() {
         val nowElapsed = SystemClock.elapsedRealtime()
 
         if (!snapshot.isStillActive(nowWall, nowElapsed)) {
-            if (pipShieldActive) {
-                overlayManager.dismiss()
-                pipShieldActive = false
-            }
+            clearFloatingShieldAndCounters()
             return
         }
 
@@ -107,11 +126,13 @@ class FreedomAccessibilityService : AccessibilityService() {
         }
 
         val observedWindows = mutableListOf<BlockDecisionEngine.ObservedWindow>()
-        var pipNodeForDismiss: AccessibilityNodeInfo? = null
+        val windowNodesByPkg = HashMap<String, Pair<AccessibilityNodeInfo?, Rect>>()
         var webRootForClassifier: Pair<AccessibilityNodeInfo, BrowserUrlExtractor.WebInspectionResult>? = null
 
         val shouldInspectWebContent =
-            snapshot.fullInternetBrowsingBlock || snapshot.blockedWebCategories.isNotEmpty() || snapshot.customBlockedDomains.isNotEmpty()
+            snapshot.fullInternetBrowsingBlock ||
+                snapshot.blockedWebCategories.isNotEmpty() ||
+                snapshot.customBlockedDomains.isNotEmpty()
 
         for (win in allWindows) {
             if (win.type != AccessibilityWindowInfo.TYPE_APPLICATION) continue
@@ -127,12 +148,20 @@ class FreedomAccessibilityService : AccessibilityService() {
 
             val bounds = Rect()
             win.getBoundsInScreen(bounds)
+            // Widen detection using OR so BOTH Vivo Small Window (often tall or wide freeform)
+            // AND Vivo Mini Window / ColorOS Flexible Window / MIUI Floating Window are caught!
             val isFloating = !isPip && !hasSplitDivider &&
                 bounds.width() > 0 && bounds.height() > 0 &&
-                (bounds.width() < (screenWidth * 0.88f) && bounds.height() < (screenHeight * 0.78f))
+                (bounds.width() < (screenWidth * 0.94f) || bounds.height() < (screenHeight * 0.86f))
+
+            if (isFloating || isPip) {
+                windowNodesByPkg[pkg] = root to Rect(bounds)
+            }
 
             val classForWindow = if (pkg == triggerPackage) triggerClassName else null
-            val webInspection = if (shouldInspectWebContent && (pkg in snapshot.allowedPackages || BrowserUrlExtractor.isBrowserPackage(pkg))) {
+            val webInspection = if (shouldInspectWebContent &&
+                (pkg in snapshot.allowedPackages || BrowserUrlExtractor.isBrowserPackage(pkg))
+            ) {
                 BrowserUrlExtractor.inspectWindow(root, pkg, classForWindow)
             } else {
                 BrowserUrlExtractor.WebInspectionResult(isKnownBrowser = BrowserUrlExtractor.isBrowserPackage(pkg))
@@ -140,10 +169,6 @@ class FreedomAccessibilityService : AccessibilityService() {
 
             if (webRootForClassifier == null && root != null && !webInspection.extractedHost.isNullOrBlank()) {
                 webRootForClassifier = root to webInspection
-            }
-
-            if (isPip && pkg !in snapshot.allowedPackages && pkg != packageName) {
-                pipNodeForDismiss = root
             }
 
             observedWindows.add(
@@ -240,171 +265,466 @@ class FreedomAccessibilityService : AccessibilityService() {
 
         when (decision) {
             is BlockDecisionEngine.Decision.Allow -> {
-                if (pipShieldActive) {
-                    overlayManager.dismiss()
-                    pipShieldActive = false
-                }
+                clearFloatingShieldAndCounters()
             }
 
             is BlockDecisionEngine.Decision.BlockApp -> {
-                if (decision.isPictureInPicture) {
-                    attemptDismissPipWindow(pipNodeForDismiss)
+                if (decision.isFloatingWindow || decision.isPictureInPicture) {
+                    val pair = windowNodesByPkg[decision.packageName]
+                    enforceFloatingOrPipTeardown(
+                        blockedPackage = decision.packageName,
+                        targetRoot = pair?.first,
+                        targetBounds = pair?.second,
+                        allWindows = allWindows,
+                        isPip = decision.isPictureInPicture,
+                        snapshot = snapshot
+                    )
+                } else {
+                    clearFloatingShieldAndCounters()
+                    enforceQuietAppBlock(
+                        blockedPackage = decision.packageName,
+                        reason = if (decision.isSystemTamperLock) {
+                            "System app locked during Locked Mode"
+                        } else if (decision.isMultiWindowOrPip) {
+                            "Blocked split-screen app"
+                        } else {
+                            "Blocked by Allowlist"
+                        },
+                        notificationText = if (decision.isSystemTamperLock) {
+                            "Locked by Freedom during Locked Mode. Stay focused."
+                        } else {
+                            "Blocked by Freedom. Do what matters."
+                        },
+                        snapshot = snapshot
+                    )
                 }
-                enforceBlock(
-                    enforcementKey = "app:${decision.packageName}:${decision.isPictureInPicture}",
-                    mode = BlockOverlayActivity.MODE_APP_BLOCKED,
-                    blockedPackage = decision.packageName,
-                    matchedReason = when {
-                        decision.isSystemTamperLock -> "System app locked during Locked Mode"
-                        decision.isPictureInPicture -> "Blocked Picture-in-Picture window"
-                        decision.isMultiWindowOrPip -> "Blocked split-screen or floating window"
-                        else -> "Blocked by Allowlist"
-                    },
-                    subtitleOverride = if (decision.isSystemTamperLock) {
-                        "Non-essential system apps and installers stay locked until your Locked Mode session finishes."
-                    } else null,
-                    snapshot = snapshot,
-                    usePersistentOverlay = decision.isPictureInPicture,
-                    closeViaBackOnly = false
-                )
             }
 
             is BlockDecisionEngine.Decision.BlockBrowsing -> {
-                enforceBlock(
-                    enforcementKey = "browse:${decision.packageName}:${decision.isInAppWebView}",
-                    mode = BlockOverlayActivity.MODE_WEBSITE_BLOCKED,
+                clearFloatingShieldAndCounters()
+                enforceQuietWebBlock(
                     blockedPackage = decision.packageName,
-                    matchedReason = if (decision.isInAppWebView) {
+                    isInAppWebView = decision.isInAppWebView,
+                    killBrowserProcess = !decision.isInAppWebView,
+                    reason = if (decision.isInAppWebView) {
                         "In-app web link blocked"
                     } else {
                         "Full internet browsing block active"
                     },
-                    subtitleOverride = "Full internet browsing is blocked during this focus session. Other allowlisted apps still have internet access.",
-                    snapshot = snapshot,
-                    usePersistentOverlay = false,
-                    closeViaBackOnly = decision.isInAppWebView
+                    notificationText = "Browsing blocked by Freedom. Do what matters.",
+                    snapshot = snapshot
                 )
             }
 
             is BlockDecisionEngine.Decision.BlockWebsite -> {
-                enforceBlock(
-                    enforcementKey = "web:${decision.packageName}:${decision.categoryTitle}",
-                    mode = BlockOverlayActivity.MODE_WEBSITE_BLOCKED,
+                clearFloatingShieldAndCounters()
+                enforceQuietWebBlock(
                     blockedPackage = decision.packageName,
-                    matchedReason = "Website blocked (${decision.categoryTitle})",
-                    subtitleOverride = "Blocked by your active ${decision.categoryTitle} filter. Add a specific URL to Allowed Websites outside Locked Mode if needed.",
-                    snapshot = snapshot,
-                    usePersistentOverlay = false,
-                    closeViaBackOnly = true
+                    isInAppWebView = true,
+                    killBrowserProcess = false,
+                    reason = "Website blocked (${decision.categoryTitle})",
+                    notificationText = "Website blocked by Freedom. Do what matters.",
+                    snapshot = snapshot
                 )
             }
 
             is BlockDecisionEngine.Decision.RequireSettingsWait -> {
-                enforceBlock(
-                    enforcementKey = "settings_wait:${decision.packageName}",
-                    mode = BlockOverlayActivity.MODE_SETTINGS_WAITING_ROOM,
+                clearFloatingShieldAndCounters()
+                enforceSettingsWaitingRoom(
                     blockedPackage = decision.packageName,
-                    matchedReason = "Emergency Settings wait (${decision.matchedRoute})",
-                    subtitleOverride = decision.matchedRoute,
-                    snapshot = snapshot,
-                    usePersistentOverlay = false,
-                    closeViaBackOnly = false
+                    matchedRoute = decision.matchedRoute,
+                    snapshot = snapshot
                 )
             }
         }
     }
 
-    private fun attemptDismissPipWindow(pipRoot: AccessibilityNodeInfo?) {
-        if (pipRoot == null) return
-        val closeLabels = listOf("close", "dismiss", "exit picture-in-picture")
-        val queue = ArrayDeque<AccessibilityNodeInfo>()
-        queue.add(pipRoot)
-        var visited = 0
-        while (queue.isNotEmpty() && visited < 24) {
-            val node = queue.removeFirst()
-            visited++
-            val desc = node.contentDescription?.toString()?.lowercase().orEmpty()
-            val text = node.text?.toString()?.lowercase().orEmpty()
-            if (node.isClickable && closeLabels.any { desc.contains(it) || text.contains(it) }) {
-                runCatching { node.performAction(AccessibilityNodeInfo.ACTION_CLICK) }
-                return
-            }
-            for (i in 0 until node.childCount.coerceAtMost(8)) {
-                node.getChild(i)?.let { queue.add(it) }
-            }
-        }
-    }
-
-    private fun enforceBlock(
-        enforcementKey: String,
-        mode: String,
+    /**
+     * Quietly evicts a blocked fullscreen/split-screen app to Home, terminates its
+     * background processes across multiple passes, and shows a clean heads-up notification
+     * without flashing a jarring full-screen overlay.
+     */
+    private fun enforceQuietAppBlock(
         blockedPackage: String,
-        matchedReason: String,
-        subtitleOverride: String?,
-        snapshot: BlockDecisionEngine.ActiveBlockSnapshot,
-        usePersistentOverlay: Boolean,
-        closeViaBackOnly: Boolean
+        reason: String,
+        notificationText: String,
+        snapshot: BlockDecisionEngine.ActiveBlockSnapshot
     ) {
-        val nowElapsed = SystemClock.elapsedRealtime()
-        if (enforcementKey == lastEnforcementKey && (nowElapsed - lastEnforcementTimeMs) < 700L) {
-            return
-        }
-        lastEnforcementKey = enforcementKey
-        lastEnforcementTimeMs = nowElapsed
+        val key = "app:$blockedPackage"
+        if (shouldThrottle(key, 650L)) return
 
         val container = (applicationContext as? FreedomApplication)?.container ?: return
         val appLabel = container.installedAppsProvider.getAppLabel(blockedPackage)
 
-        // 1. Instant zero-extra-permission Accessibility overlay shield
-        val title = when (mode) {
-            BlockOverlayActivity.MODE_SETTINGS_WAITING_ROOM -> "Emergency Settings Wait"
-            BlockOverlayActivity.MODE_WEBSITE_BLOCKED -> "Browsing Blocked"
-            else -> "$appLabel Blocked"
-        }
-        overlayManager.showShield(
-            title = title,
-            subtitle = subtitleOverride ?: matchedReason,
-            persistent = usePersistentOverlay
+        // 1. Immediately evict to Home screen
+        performGlobalAction(GLOBAL_ACTION_HOME)
+
+        // 2. Kill background processes immediately and right after leaving foreground
+        scheduleBackgroundProcessKill(blockedPackage)
+
+        // 3. Clean heads-up focus notification (matching Screenshot 2)
+        FreedomBlockNotifier.showBlockedAlert(
+            context = this,
+            message = notificationText
         )
-        pipShieldActive = usePersistentOverlay
 
-        // 2. Immediately dismiss in-app WebView/Custom Tab/tab or push blocked app to background
-        if (closeViaBackOnly) {
-            performGlobalAction(GLOBAL_ACTION_BACK)
-        } else if (mode != BlockOverlayActivity.MODE_SETTINGS_WAITING_ROOM) {
-            performGlobalAction(GLOBAL_ACTION_HOME)
-        }
-
-        // 3. Launch non-resizable BlockOverlayActivity (exits split-screen cleanly & hosts 5-min Settings Waiting Room)
-        val overlayIntent = Intent(this, BlockOverlayActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or
-                Intent.FLAG_ACTIVITY_CLEAR_TOP or
-                Intent.FLAG_ACTIVITY_SINGLE_TOP or
-                Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
-            putExtra(BlockOverlayActivity.EXTRA_MODE, mode)
-            putExtra(BlockOverlayActivity.EXTRA_BLOCKED_PACKAGE, blockedPackage)
-            putExtra(BlockOverlayActivity.EXTRA_BLOCKED_LABEL, appLabel)
-            putExtra(BlockOverlayActivity.EXTRA_REASON_SUBTITLE, subtitleOverride ?: matchedReason)
-            putExtra(BlockOverlayActivity.EXTRA_SESSION_LABEL, snapshot.label)
-            putExtra(BlockOverlayActivity.EXTRA_STRICT_MODE, snapshot.strictMode)
-        }
-        runCatching { startActivity(overlayIntent) }
-
-        // 4. Record blocked attempt asynchronously (never stores plain-text hidden domains!)
+        // 4. Log attempt asynchronously
         serviceScope.launch {
             container.repository.recordBlockEvent(
                 sessionId = snapshot.sessionId,
                 packageName = blockedPackage,
                 appLabel = appLabel,
-                reason = matchedReason
+                reason = reason
             )
         }
+    }
+
+    /**
+     * Dedicated teardown for Vivo Small Window & Mini Window, ColorOS Flexible Window,
+     * MIUI Floating Window, and Android Picture-in-Picture.
+     *
+     * Avoids sending blind GLOBAL_ACTION_HOME while a Small Window is open (which causes
+     * Vivo smartmultiwindow to shrink it into a lingering Mini Window instead of closing it).
+     */
+    private fun enforceFloatingOrPipTeardown(
+        blockedPackage: String,
+        targetRoot: AccessibilityNodeInfo?,
+        targetBounds: Rect?,
+        allWindows: List<AccessibilityWindowInfo>,
+        isPip: Boolean,
+        snapshot: BlockDecisionEngine.ActiveBlockSnapshot
+    ) {
+        val key = "float:$blockedPackage:$isPip"
+        if (shouldThrottle(key, 340L)) return
+
+        if (lastFloatingPkg == blockedPackage) {
+            consecutiveFloatingHits++
+        } else {
+            lastFloatingPkg = blockedPackage
+            consecutiveFloatingHits = 1
+        }
+
+        val container = (applicationContext as? FreedomApplication)?.container ?: return
+        val appLabel = container.installedAppsProvider.getAppLabel(blockedPackage)
+
+        // Step 1: Try clicking the Close ("×") control directly inside the floating window OR
+        // inside any overlapping OEM window-manager caption bar (e.g. com.vivo.smartmultiwindow / SystemUI)
+        val clickedClose = attemptCloseFloatingOrPipWindow(
+            targetRoot = targetRoot,
+            targetBounds = targetBounds,
+            allWindows = allWindows
+        )
+
+        // Step 2: If Close wasn't exposed yet (e.g. collapsed Vivo Mini Window), send BACK to exit cleanly
+        // (and on repeat pass, tap the top caption handle if found so Close appears, never shrinking via HOME!)
+        if (!clickedClose) {
+            performGlobalAction(GLOBAL_ACTION_BACK)
+            if (consecutiveFloatingHits >= 2) {
+                attemptRevealCaptionClose(targetRoot, targetBounds, allWindows)
+            }
+        }
+
+        // Step 3: Multi-pass background process termination once the floating window closes
+        scheduleBackgroundProcessKill(blockedPackage)
+
+        // Step 4: Clean heads-up notification
+        FreedomBlockNotifier.showBlockedAlert(
+            context = this,
+            message = "Blocked by Freedom. Do what matters."
+        )
+
+        // Step 5: If the OEM STILL keeps a stubborn Mini Window or PiP pinned after 2 attempts,
+        // cover it with an impenetrable TYPE_ACCESSIBILITY_OVERLAY shield (renders ABOVE Mini Windows!)
+        if (consecutiveFloatingHits >= 2) {
+            overlayManager.showShield(
+                title = "$appLabel Blocked",
+                subtitle = if (isPip) {
+                    "Close Picture-in-Picture to return to your focus session."
+                } else {
+                    "Floating & Mini Windows are blocked during your focus session."
+                },
+                persistent = true,
+                onDismissAction = {
+                    attemptCloseFloatingOrPipWindow(targetRoot, targetBounds, allWindows)
+                    performGlobalAction(GLOBAL_ACTION_HOME)
+                    scheduleBackgroundProcessKill(blockedPackage)
+                    recheckActiveWindowsNow()
+                }
+            )
+            persistentFloatingShieldActive = true
+        }
+
+        // Fast follow-up check to verify the Small Window / Mini Window actually disappeared
+        mainHandler.removeCallbacks(floatingWatchdogRunnable)
+        mainHandler.postDelayed(floatingWatchdogRunnable, 420L)
+
+        // Record only on initial hit so retries don't inflate stats
+        if (consecutiveFloatingHits == 1) {
+            serviceScope.launch {
+                container.repository.recordBlockEvent(
+                    sessionId = snapshot.sessionId,
+                    packageName = blockedPackage,
+                    appLabel = appLabel,
+                    reason = if (isPip) "Blocked Picture-in-Picture window" else "Blocked floating / mini window"
+                )
+            }
+        }
+    }
+
+    /**
+     * Quietly closes a blocked website or in-app WebView/Custom Tab and notifies cleanly.
+     */
+    private fun enforceQuietWebBlock(
+        blockedPackage: String,
+        isInAppWebView: Boolean,
+        killBrowserProcess: Boolean,
+        reason: String,
+        notificationText: String,
+        snapshot: BlockDecisionEngine.ActiveBlockSnapshot
+    ) {
+        val key = "web:$blockedPackage:$reason"
+        if (shouldThrottle(key, 700L)) return
+
+        val container = (applicationContext as? FreedomApplication)?.container ?: return
+        val appLabel = container.installedAppsProvider.getAppLabel(blockedPackage)
+
+        if (isInAppWebView) {
+            performGlobalAction(GLOBAL_ACTION_BACK)
+        } else {
+            performGlobalAction(GLOBAL_ACTION_HOME)
+        }
+
+        if (killBrowserProcess) {
+            scheduleBackgroundProcessKill(blockedPackage)
+        }
+
+        FreedomBlockNotifier.showBlockedAlert(
+            context = this,
+            message = notificationText
+        )
+
+        serviceScope.launch {
+            container.repository.recordBlockEvent(
+                sessionId = snapshot.sessionId,
+                packageName = blockedPackage,
+                appLabel = appLabel,
+                reason = reason
+            )
+        }
+    }
+
+    /**
+     * Dedicated full-screen 5-minute continuous Emergency Settings Waiting Room
+     * (ONLY shown when user opens Android Settings during Locked Mode).
+     */
+    private fun enforceSettingsWaitingRoom(
+        blockedPackage: String,
+        matchedRoute: String,
+        snapshot: BlockDecisionEngine.ActiveBlockSnapshot
+    ) {
+        val key = "settings_wait:$blockedPackage"
+        if (shouldThrottle(key, 700L)) return
+
+        val container = (applicationContext as? FreedomApplication)?.container ?: return
+        val appLabel = container.installedAppsProvider.getAppLabel(blockedPackage)
+
+        val overlayIntent = Intent(this, BlockOverlayActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
+            putExtra(BlockOverlayActivity.EXTRA_MODE, BlockOverlayActivity.MODE_SETTINGS_WAITING_ROOM)
+            putExtra(BlockOverlayActivity.EXTRA_BLOCKED_PACKAGE, blockedPackage)
+            putExtra(BlockOverlayActivity.EXTRA_BLOCKED_LABEL, appLabel)
+            putExtra(BlockOverlayActivity.EXTRA_REASON_SUBTITLE, matchedRoute)
+            putExtra(BlockOverlayActivity.EXTRA_SESSION_LABEL, snapshot.label)
+            putExtra(BlockOverlayActivity.EXTRA_STRICT_MODE, snapshot.strictMode)
+        }
+        runCatching { startActivity(overlayIntent) }
+
+        serviceScope.launch {
+            container.repository.recordBlockEvent(
+                sessionId = snapshot.sessionId,
+                packageName = blockedPackage,
+                appLabel = appLabel,
+                reason = "Emergency Settings wait ($matchedRoute)"
+            )
+        }
+    }
+
+    /**
+     * Calls ActivityManager.killBackgroundProcesses across staggered delays so that once
+     * the blocked app exits foreground (after Home or floating-window close), Android
+     * immediately terminates its background process.
+     */
+    private fun scheduleBackgroundProcessKill(targetPackage: String) {
+        if (targetPackage.isBlank() || targetPackage == packageName) return
+        val am = getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager ?: return
+        val killNow = {
+            runCatching { am.killBackgroundProcesses(targetPackage) }
+        }
+        killNow()
+        mainHandler.postDelayed({ killNow() }, 280L)
+        mainHandler.postDelayed({ killNow() }, 700L)
+    }
+
+    /**
+     * Searches BOTH the floating/PiP app window AND any overlapping OEM window-manager
+     * caption window (Vivo smartmultiwindow, ColorOS, MIUI, SystemUI) for Close controls.
+     */
+    private fun attemptCloseFloatingOrPipWindow(
+        targetRoot: AccessibilityNodeInfo?,
+        targetBounds: Rect?,
+        allWindows: List<AccessibilityWindowInfo>
+    ): Boolean {
+        if (targetRoot != null && findAndClickCloseNode(targetRoot)) {
+            return true
+        }
+        if (targetBounds == null) return false
+
+        // Expand slightly upward to catch OEM caption bars docked right above the Small/Mini Window
+        val expanded = Rect(
+            targetBounds.left - 48,
+            (targetBounds.top - 160).coerceAtLeast(0),
+            targetBounds.right + 48,
+            targetBounds.bottom + 48
+        )
+
+        for (win in allWindows) {
+            val winRoot = runCatching { win.root }.getOrNull() ?: continue
+            val winPkg = winRoot.packageName?.toString().orEmpty()
+            val isOemCaptionWindow = win.type == AccessibilityWindowInfo.TYPE_SYSTEM ||
+                winPkg.contains("smartmultiwindow", ignoreCase = true) ||
+                winPkg.contains("freeform", ignoreCase = true) ||
+                winPkg.contains("systemui", ignoreCase = true) ||
+                winPkg.contains("multiwindow", ignoreCase = true)
+            if (!isOemCaptionWindow) continue
+
+            val winBounds = Rect()
+            win.getBoundsInScreen(winBounds)
+            if (Rect.intersects(expanded, winBounds)) {
+                if (findAndClickCloseNode(winRoot)) {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    private fun attemptRevealCaptionClose(
+        targetRoot: AccessibilityNodeInfo?,
+        targetBounds: Rect?,
+        allWindows: List<AccessibilityWindowInfo>
+    ) {
+        if (targetBounds == null) return
+        val expanded = Rect(
+            targetBounds.left - 32,
+            (targetBounds.top - 120).coerceAtLeast(0),
+            targetBounds.right + 32,
+            targetBounds.top + 120
+        )
+        for (win in allWindows) {
+            val winRoot = runCatching { win.root }.getOrNull() ?: continue
+            val winBounds = Rect()
+            win.getBoundsInScreen(winBounds)
+            if (Rect.intersects(expanded, winBounds)) {
+                findAndClickHandleNode(winRoot)
+            }
+        }
+        targetRoot?.let { findAndClickHandleNode(it) }
+    }
+
+    private fun findAndClickCloseNode(root: AccessibilityNodeInfo): Boolean {
+        val closeTokens = listOf(
+            "close", "dismiss", "exit picture-in-picture", "exit freeform",
+            "close window", "close mini", "关闭", "退出"
+        )
+        val closeIdTokens = listOf(
+            "close", "btn_close", "close_btn", "freeform_close",
+            "mini_close", "vivo_freeform_close", "exit_freeform", "dismiss"
+        )
+
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(root)
+        var visited = 0
+        while (queue.isNotEmpty() && visited < 48) {
+            val node = queue.removeFirst()
+            visited++
+            val desc = node.contentDescription?.toString()?.lowercase().orEmpty()
+            val text = node.text?.toString()?.lowercase().orEmpty()
+            val resId = node.viewIdResourceName?.lowercase().orEmpty()
+
+            val matchesClose = closeTokens.any { desc.contains(it) || text == it } ||
+                closeIdTokens.any { resId.contains(it) }
+
+            if (matchesClose) {
+                var clickable: AccessibilityNodeInfo? = node
+                var hops = 0
+                while (clickable != null && !clickable.isClickable && hops < 3) {
+                    clickable = clickable.parent
+                    hops++
+                }
+                val actionTarget = clickable ?: node
+                val clicked = runCatching {
+                    actionTarget.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                }.getOrDefault(false)
+                if (clicked) return true
+            }
+
+            for (i in 0 until node.childCount.coerceAtMost(12)) {
+                node.getChild(i)?.let { queue.add(it) }
+            }
+        }
+        return false
+    }
+
+    private fun findAndClickHandleNode(root: AccessibilityNodeInfo): Boolean {
+        val handleTokens = listOf("caption", "handle", "more", "menu", "toolbar", "freeform_bar")
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(root)
+        var visited = 0
+        while (queue.isNotEmpty() && visited < 28) {
+            val node = queue.removeFirst()
+            visited++
+            val resId = node.viewIdResourceName?.lowercase().orEmpty()
+            val desc = node.contentDescription?.toString()?.lowercase().orEmpty()
+            if (node.isClickable && handleTokens.any { resId.contains(it) || desc.contains(it) }) {
+                return runCatching {
+                    node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                }.getOrDefault(false)
+            }
+            for (i in 0 until node.childCount.coerceAtMost(8)) {
+                node.getChild(i)?.let { queue.add(it) }
+            }
+        }
+        return false
+    }
+
+    private fun clearFloatingShieldAndCounters() {
+        mainHandler.removeCallbacks(floatingWatchdogRunnable)
+        consecutiveFloatingHits = 0
+        lastFloatingPkg = ""
+        if (persistentFloatingShieldActive) {
+            overlayManager.dismiss()
+            persistentFloatingShieldActive = false
+        }
+    }
+
+    private fun shouldThrottle(key: String, windowMs: Long): Boolean {
+        val nowElapsed = SystemClock.elapsedRealtime()
+        if (key == lastEnforcementKey && (nowElapsed - lastEnforcementTimeMs) < windowMs) {
+            return true
+        }
+        lastEnforcementKey = key
+        lastEnforcementTimeMs = nowElapsed
+        return false
     }
 
     override fun onInterrupt() = Unit
 
     override fun onDestroy() {
         super.onDestroy()
+        mainHandler.removeCallbacksAndMessages(null)
         if (::overlayManager.isInitialized) {
             overlayManager.dismiss()
         }

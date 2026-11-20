@@ -17,6 +17,7 @@ object BlockDecisionEngine {
         data class BlockApp(
             val packageName: String,
             val isMultiWindowOrPip: Boolean = false,
+            val isFloatingWindow: Boolean = false,
             val isPictureInPicture: Boolean = false,
             val isSystemTamperLock: Boolean = false
         ) : Decision()
@@ -187,7 +188,11 @@ object BlockDecisionEngine {
             when (decision) {
                 is Decision.RequireSettingsWait -> return decision
                 is Decision.BlockApp -> {
-                    if (firstAppBlock == null || decision.isSystemTamperLock || decision.isPictureInPicture) {
+                    if (firstAppBlock == null ||
+                        decision.isSystemTamperLock ||
+                        decision.isPictureInPicture ||
+                        decision.isFloatingWindow
+                    ) {
                         firstAppBlock = decision
                     }
                 }
@@ -264,6 +269,7 @@ object BlockDecisionEngine {
             return Decision.BlockApp(
                 packageName = pkg,
                 isMultiWindowOrPip = window.isMultiWindowOrPip,
+                isFloatingWindow = window.isFloatingWindow,
                 isPictureInPicture = window.isPictureInPicture,
                 isSystemTamperLock = true
             )
@@ -323,6 +329,7 @@ object BlockDecisionEngine {
             return Decision.BlockApp(
                 packageName = pkg,
                 isMultiWindowOrPip = window.isMultiWindowOrPip,
+                isFloatingWindow = window.isFloatingWindow,
                 isPictureInPicture = window.isPictureInPicture
             )
         }

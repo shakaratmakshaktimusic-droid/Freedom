@@ -1,6 +1,13 @@
 package com.example.ui.screens
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -19,7 +26,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -64,6 +70,7 @@ import com.example.data.repository.InstalledAppInfo
 import com.example.domain.WebsiteCategory
 import com.example.ui.FreedomUiState
 import com.example.ui.theme.FreedomGlass
+import com.example.ui.theme.FreedomMotion
 import com.example.ui.theme.FreedomSwitch
 import com.example.ui.theme.GlassCard
 import com.example.ui.theme.GlassDivider
@@ -71,12 +78,12 @@ import com.example.ui.theme.GlassGroupedRow
 import com.example.ui.theme.GlassPillButton
 import com.example.ui.theme.GlassSegmentedControl
 
-private sealed class BlocklistSubScreen {
-    data object List : BlocklistSubScreen()
-    data class EditProfile(val profileId: Long) : BlocklistSubScreen()
-    data object PickAllowedApps : BlocklistSubScreen()
-    data object PickWebCategories : BlocklistSubScreen()
-    data object ManageAllowedWebsites : BlocklistSubScreen()
+private sealed class BlocklistSubScreen(val depth: Int) {
+    data object List : BlocklistSubScreen(0)
+    data class EditProfile(val profileId: Long) : BlocklistSubScreen(1)
+    data object PickAllowedApps : BlocklistSubScreen(2)
+    data object PickWebCategories : BlocklistSubScreen(2)
+    data object ManageAllowedWebsites : BlocklistSubScreen(2)
 }
 
 /**
@@ -132,108 +139,123 @@ fun BlocklistsScreen(
         subScreen = BlocklistSubScreen.EditProfile(draftProfileId)
     }
 
-    when (subScreen) {
-        BlocklistSubScreen.List -> {
-            BlocklistListView(
-                uiState = uiState,
-                onEditProfile = { openEditorFor(it) },
-                onDeleteProfile = onDeleteBlocklist,
-                onCreateNew = { openEditorFor(null) },
-                onOpenAllowedWebsites = {
-                    openedExceptionsFromEditor = false
-                    subScreen = BlocklistSubScreen.ManageAllowedWebsites
-                },
-                modifier = modifier
-            )
-        }
-
-        is BlocklistSubScreen.EditProfile -> {
-            BackHandler { subScreen = BlocklistSubScreen.List }
-            BlocklistEditorView(
-                isNew = draftProfileId == 0L,
-                name = draftName,
-                onNameChange = { draftName = it },
-                allowedAppCount = draftAllowedApps.size,
-                selectedCategoryCount = draftCategories.size,
-                allowedWebsiteCount = uiState.allowedWebsites.size,
-                fullBrowsingBlock = draftFullBrowsing,
-                onFullBrowsingChange = { draftFullBrowsing = it },
-                onOpenAppPicker = { subScreen = BlocklistSubScreen.PickAllowedApps },
-                onOpenWebCategories = { subScreen = BlocklistSubScreen.PickWebCategories },
-                onOpenAllowedWebsites = {
-                    openedExceptionsFromEditor = true
-                    subScreen = BlocklistSubScreen.ManageAllowedWebsites
-                },
-                onCancel = { subScreen = BlocklistSubScreen.List },
-                onSave = {
-                    onSaveBlocklist(
-                        draftProfileId,
-                        draftName.ifBlank { "My Blocklist" },
-                        draftFullBrowsing,
-                        draftCategories,
-                        draftAllowedApps
-                    ) {
-                        subScreen = BlocklistSubScreen.List
-                    }
-                },
-                modifier = modifier
-            )
-        }
-
-        BlocklistSubScreen.PickAllowedApps -> {
-            BackHandler { subScreen = BlocklistSubScreen.EditProfile(draftProfileId) }
-            AllowedAppsPickerView(
-                installedApps = uiState.installedApps,
-                selectedApps = draftAllowedApps,
-                onToggleApp = { app ->
-                    draftAllowedApps = if (app.packageName in draftAllowedApps) {
-                        draftAllowedApps - app.packageName
-                    } else {
-                        draftAllowedApps + (app.packageName to app.label)
-                    }
-                },
-                onBack = { subScreen = BlocklistSubScreen.EditProfile(draftProfileId) },
-                modifier = modifier
-            )
-        }
-
-        BlocklistSubScreen.PickWebCategories -> {
-            BackHandler { subScreen = BlocklistSubScreen.EditProfile(draftProfileId) }
-            WebFilterCategoriesView(
-                selectedCategories = draftCategories,
-                customBlockedDomains = uiState.customBlockedWebsites.map { it.domain },
-                onToggleCategory = { cat, enabled ->
-                    draftCategories = if (enabled) draftCategories + cat else draftCategories - cat
-                },
-                onAddCustomBlocked = onAddCustomBlockedWebsite,
-                onRemoveCustomBlocked = onRemoveCustomBlockedWebsite,
-                onBack = { subScreen = BlocklistSubScreen.EditProfile(draftProfileId) },
-                modifier = modifier
-            )
-        }
-
-        BlocklistSubScreen.ManageAllowedWebsites -> {
-            BackHandler {
-                subScreen = if (openedExceptionsFromEditor) {
-                    BlocklistSubScreen.EditProfile(draftProfileId)
-                } else {
-                    BlocklistSubScreen.List
-                }
+    AnimatedContent(
+        targetState = subScreen,
+        transitionSpec = {
+            val deeper = targetState.depth >= initialState.depth
+            (slideInHorizontally(
+                animationSpec = FreedomMotion.FluidIntOffsetSpring,
+                initialOffsetX = { if (deeper) it / 5 else -it / 6 }
+            ) + fadeIn(tween(220))) togetherWith (slideOutHorizontally(
+                animationSpec = FreedomMotion.FluidIntOffsetSpring,
+                targetOffsetX = { if (deeper) -it / 6 else it / 5 }
+            ) + fadeOut(tween(160)))
+        },
+        label = "blocklists_subscreen"
+    ) { active ->
+        when (active) {
+            BlocklistSubScreen.List -> {
+                BlocklistListView(
+                    uiState = uiState,
+                    onEditProfile = { openEditorFor(it) },
+                    onDeleteProfile = onDeleteBlocklist,
+                    onCreateNew = { openEditorFor(null) },
+                    onOpenAllowedWebsites = {
+                        openedExceptionsFromEditor = false
+                        subScreen = BlocklistSubScreen.ManageAllowedWebsites
+                    },
+                    modifier = modifier
+                )
             }
-            AllowedWebsitesView(
-                allowedWebsites = uiState.allowedWebsites.map { it.pattern },
-                isStrictModeActive = uiState.isStrictModeActive,
-                onAdd = onAddAllowedWebsite,
-                onRemove = onRemoveAllowedWebsite,
-                onBack = {
+
+            is BlocklistSubScreen.EditProfile -> {
+                BackHandler { subScreen = BlocklistSubScreen.List }
+                BlocklistEditorView(
+                    isNew = draftProfileId == 0L,
+                    name = draftName,
+                    onNameChange = { draftName = it },
+                    allowedAppCount = draftAllowedApps.size,
+                    selectedCategoryCount = draftCategories.size,
+                    allowedWebsiteCount = uiState.allowedWebsites.size,
+                    fullBrowsingBlock = draftFullBrowsing,
+                    onFullBrowsingChange = { draftFullBrowsing = it },
+                    onOpenAppPicker = { subScreen = BlocklistSubScreen.PickAllowedApps },
+                    onOpenWebCategories = { subScreen = BlocklistSubScreen.PickWebCategories },
+                    onOpenAllowedWebsites = {
+                        openedExceptionsFromEditor = true
+                        subScreen = BlocklistSubScreen.ManageAllowedWebsites
+                    },
+                    onCancel = { subScreen = BlocklistSubScreen.List },
+                    onSave = {
+                        onSaveBlocklist(
+                            draftProfileId,
+                            draftName.ifBlank { "My Blocklist" },
+                            draftFullBrowsing,
+                            draftCategories,
+                            draftAllowedApps
+                        ) {
+                            subScreen = BlocklistSubScreen.List
+                        }
+                    },
+                    modifier = modifier
+                )
+            }
+
+            BlocklistSubScreen.PickAllowedApps -> {
+                BackHandler { subScreen = BlocklistSubScreen.EditProfile(draftProfileId) }
+                AllowedAppsPickerView(
+                    installedApps = uiState.installedApps,
+                    selectedApps = draftAllowedApps,
+                    onToggleApp = { app ->
+                        draftAllowedApps = if (app.packageName in draftAllowedApps) {
+                            draftAllowedApps - app.packageName
+                        } else {
+                            draftAllowedApps + (app.packageName to app.label)
+                        }
+                    },
+                    onBack = { subScreen = BlocklistSubScreen.EditProfile(draftProfileId) },
+                    modifier = modifier
+                )
+            }
+
+            BlocklistSubScreen.PickWebCategories -> {
+                BackHandler { subScreen = BlocklistSubScreen.EditProfile(draftProfileId) }
+                WebFilterCategoriesView(
+                    selectedCategories = draftCategories,
+                    customBlockedDomains = uiState.customBlockedWebsites.map { it.domain },
+                    onToggleCategory = { cat, enabled ->
+                        draftCategories = if (enabled) draftCategories + cat else draftCategories - cat
+                    },
+                    onAddCustomBlocked = onAddCustomBlockedWebsite,
+                    onRemoveCustomBlocked = onRemoveCustomBlockedWebsite,
+                    onBack = { subScreen = BlocklistSubScreen.EditProfile(draftProfileId) },
+                    modifier = modifier
+                )
+            }
+
+            BlocklistSubScreen.ManageAllowedWebsites -> {
+                BackHandler {
                     subScreen = if (openedExceptionsFromEditor) {
                         BlocklistSubScreen.EditProfile(draftProfileId)
                     } else {
                         BlocklistSubScreen.List
                     }
-                },
-                modifier = modifier
-            )
+                }
+                AllowedWebsitesView(
+                    allowedWebsites = uiState.allowedWebsites.map { it.pattern },
+                    isStrictModeActive = uiState.isStrictModeActive,
+                    onAdd = onAddAllowedWebsite,
+                    onRemove = onRemoveAllowedWebsite,
+                    onBack = {
+                        subScreen = if (openedExceptionsFromEditor) {
+                            BlocklistSubScreen.EditProfile(draftProfileId)
+                        } else {
+                            BlocklistSubScreen.List
+                        }
+                    },
+                    modifier = modifier
+                )
+            }
         }
     }
 }
