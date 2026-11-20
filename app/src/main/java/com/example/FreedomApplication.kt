@@ -22,6 +22,8 @@ class FreedomContainer(app: Application) {
     val installedAppsProvider: InstalledAppsProvider = InstalledAppsProvider(app)
     val alarmScheduler: SessionAlarmScheduler = SessionAlarmScheduler(app)
     val permissionChecker: PermissionStatusChecker = PermissionStatusChecker(app)
+    val youtubeChannelResolver: com.example.data.remote.YouTubeChannelResolver =
+        com.example.data.remote.YouTubeChannelResolver()
     val filterSyncEngine: FilterListSyncEngine = FilterListSyncEngine(
         context = app,
         dao = database.freedomDao(),
@@ -34,7 +36,8 @@ class FreedomContainer(app: Application) {
         fastStore = fastStore,
         installedAppsProvider = installedAppsProvider,
         alarmScheduler = alarmScheduler,
-        filterSyncEngine = filterSyncEngine
+        filterSyncEngine = filterSyncEngine,
+        youtubeChannelResolver = youtubeChannelResolver
     )
 }
 

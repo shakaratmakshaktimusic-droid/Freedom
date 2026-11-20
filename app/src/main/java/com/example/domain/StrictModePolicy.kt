@@ -72,4 +72,34 @@ object StrictModePolicy {
             GuardResult.Permitted
         }
     }
+
+    fun canDisableContentProtection(
+        featureName: String,
+        isStrictModeActive: Boolean
+    ): GuardResult {
+        return if (isStrictModeActive) {
+            GuardResult.Denied("Locked Mode is active. $featureName cannot be turned off until the session ends.")
+        } else {
+            GuardResult.Permitted
+        }
+    }
+
+    fun canModifyApprovedYouTubeChannels(isStrictModeActive: Boolean): GuardResult {
+        return if (isStrictModeActive) {
+            GuardResult.Denied("Locked Mode is active. Approved YouTube channels cannot be modified until the session ends.")
+        } else {
+            GuardResult.Permitted
+        }
+    }
+
+    fun canWeakenContentProtectionRule(
+        ruleDescription: String,
+        isStrictModeActive: Boolean
+    ): GuardResult {
+        return if (isStrictModeActive) {
+            GuardResult.Denied("Locked Mode is active. $ruleDescription cannot be weakened until the session ends.")
+        } else {
+            GuardResult.Permitted
+        }
+    }
 }

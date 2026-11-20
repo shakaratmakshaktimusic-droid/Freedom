@@ -123,3 +123,50 @@ data class BlockEventEntity(
     val appLabel: String,
     val reason: String
 )
+
+/**
+ * Shared approved YouTube channel allowlist across Official YouTube, Morphe YT,
+ * YouTube ReVanced, and supported third-party YouTube clients.
+ * Anchored by permanent canonical YouTube channel ID (UC..., 24 characters).
+ */
+@Entity(tableName = "approved_youtube_channels")
+data class ApprovedYouTubeChannelEntity(
+    @PrimaryKey val channelId: String,
+    val handle: String = "",
+    val title: String,
+    val avatarUrl: String = "",
+    val subscriberSummary: String = "",
+    val verifiedSource: String = "PUBLIC_METADATA",
+    val verifiedAtMs: Long = System.currentTimeMillis()
+)
+
+/**
+ * Local offline cache mapping verified YouTube video IDs to their permanent UC... channel ID
+ * so direct video links (youtube.com/watch?v=..., youtu.be/...) resolve instantaneously offline.
+ */
+@Entity(tableName = "youtube_video_channel_cache")
+data class YouTubeVideoChannelCacheEntity(
+    @PrimaryKey val videoId: String,
+    val channelId: String,
+    val channelTitle: String = "",
+    val verifiedAtMs: Long = System.currentTimeMillis()
+)
+
+/**
+ * Dedicated, extensible SafeSearch provider rules table (kept separate from website blocklists).
+ * Pre-seeded offline and safely updated with rollback-to-last-valid-state on sync failure.
+ */
+@Entity(tableName = "safesearch_provider_rules")
+data class SafeSearchProviderRuleEntity(
+    @PrimaryKey val providerId: String,
+    val displayName: String,
+    val hostsCsv: String,
+    val searchPathsCsv: String,
+    val strictParamKey: String,
+    val strictParamValue: String,
+    val unsafeParamValuesCsv: String = "",
+    val settingsPathsCsv: String = "",
+    val imageIndicatorsCsv: String = "",
+    val enforceMethod: String = "URL_PARAM",
+    val updatedAtMs: Long = System.currentTimeMillis()
+)

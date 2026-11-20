@@ -121,6 +121,7 @@ fun BlocklistsScreen(
     onRemoveAllowedWebsite: (String) -> Unit,
     onAddCustomBlockedWebsite: (String) -> Unit,
     onRemoveCustomBlockedWebsite: (String) -> Unit,
+    onOpenContentProtection: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var subScreen by remember { mutableStateOf<BlocklistSubScreen>(BlocklistSubScreen.List) }
@@ -177,6 +178,7 @@ fun BlocklistsScreen(
                         openedExceptionsFromEditor = false
                         subScreen = BlocklistSubScreen.ManageAllowedWebsites
                     },
+                    onOpenContentProtection = onOpenContentProtection,
                     modifier = modifier
                 )
             }
@@ -280,6 +282,7 @@ private fun BlocklistListView(
     onDeleteProfile: (Long) -> Unit,
     onCreateNew: () -> Unit,
     onOpenAllowedWebsites: () -> Unit,
+    onOpenContentProtection: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val g = FreedomGlass.colors
@@ -370,6 +373,33 @@ private fun BlocklistListView(
                             }
                         }
                     }
+                }
+            }
+
+            // Always-on Content Protection (YouTube Study Mode, Universal SafeSearch, In-App Adult Filter)
+            item(key = "blocklists_content_protection") {
+                val cp = uiState.contentProtection
+                val enabledCount = listOf(
+                    cp.youtubeStudyModeEnabled,
+                    cp.safeSearchEnabled,
+                    cp.inAppAdultFilterEnabled
+                ).count { it }
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = "Content Protection",
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                    color = g.textPrimary
+                )
+                Spacer(Modifier.height(8.dp))
+                GlassCard(contentPadding = PaddingValues(0.dp)) {
+                    GlassGroupedRow(
+                        title = "YouTube Study Mode, SafeSearch & Adult Filter",
+                        subtitle = "${uiState.approvedYouTubeChannels.size} approved channels · ${uiState.safeSearchProviderRules.size} search engines · Always-on protection",
+                        leadingIcon = Icons.Rounded.Shield,
+                        trailingText = if (enabledCount > 0) "$enabledCount/3 On" else "Off",
+                        onClick = onOpenContentProtection,
+                        modifier = Modifier.testTag("blocklists_open_content_protection_row")
+                    )
                 }
             }
 

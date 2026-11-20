@@ -6,6 +6,7 @@ import com.example.blocker.FreedomMonitorService
 import com.example.blocker.FreedomNotificationListenerService
 import com.example.blocker.SessionAlarmScheduler
 import com.example.data.local.AllowedWebsiteEntity
+import com.example.data.local.ApprovedYouTubeChannelEntity
 import com.example.data.local.AutoLearnedHashEntity
 import com.example.data.local.BlockEventEntity
 import com.example.data.local.BlocklistAllowedAppEntity
@@ -14,15 +15,25 @@ import com.example.data.local.CustomBlockedWebsiteEntity
 import com.example.data.local.FastBlockStateStore
 import com.example.data.local.FocusSessionEntity
 import com.example.data.local.FreedomDao
+import com.example.data.local.SafeSearchProviderRuleEntity
 import com.example.data.local.ScheduleEntity
+import com.example.data.local.YouTubeVideoChannelCacheEntity
+import com.example.data.remote.YouTubeChannelResolver
 import com.example.data.sync.FilterListSyncEngine
+import com.example.domain.ChannelLookupState
+import com.example.domain.ContentProtectionConfig
 import com.example.domain.DndMode
 import com.example.domain.DomainBlockMatcher
 import com.example.domain.FilterUpdateFrequency
+import com.example.domain.SafeSearchEnforceMethod
+import com.example.domain.SafeSearchEngine
+import com.example.domain.SafeSearchProviderRule
 import com.example.domain.ScheduleCalculator
 import com.example.domain.StrictModePolicy
 import com.example.domain.ThemeMode
+import com.example.domain.VerifiedYouTubeChannel
 import com.example.domain.WebsiteCategory
+import com.example.domain.YouTubeStudyEngine
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -33,7 +44,8 @@ class FreedomRepository(
     private val fastStore: FastBlockStateStore,
     private val installedAppsProvider: InstalledAppsProvider,
     private val alarmScheduler: SessionAlarmScheduler,
-    val filterSyncEngine: FilterListSyncEngine
+    val filterSyncEngine: FilterListSyncEngine,
+    val youtubeChannelResolver: YouTubeChannelResolver = YouTubeChannelResolver()
 ) {
     private val reconcileMutex = Mutex()
 
@@ -46,9 +58,13 @@ class FreedomRepository(
     val activeSessionFlow: Flow<FocusSessionEntity?> = dao.observeActiveSession()
     val recentSessionsFlow: Flow<List<FocusSessionEntity>> = dao.observeRecentSessions()
     val recentBlockEventsFlow: Flow<List<BlockEventEntity>> = dao.observeRecentBlockEvents()
+    val approvedYouTubeChannelsFlow: Flow<List<ApprovedYouTubeChannelEntity>> = dao.observeApprovedYouTubeChannels()
+    val safeSearchProviderRulesFlow: Flow<List<SafeSearchProviderRuleEntity>> = dao.observeSafeSearchProviderRules()
 
     suspend fun initialize() {
         ensureDefaultBlocklistExists()
+        ensureDefaultSafeSearchRulesSeeded()
+        syncApprovedYouTubeChannelsToFastStore()
         filterSyncEngine.loadCachedIndexIntoMemory()
         reconcileSessionState()
         filterSyncEngine.syncIfDue()
@@ -566,4 +582,192 @@ class FreedomRepository(
 
     suspend fun loadLaunchableApps(): List<InstalledAppInfo> =
         installedAppsProvider.loadLaunchableApps()
+
+    // -------------------------------------------------------------------------
+    // Advanced Content Protection: YouTube Study Mode, Universal SafeSearch,
+    // and In-App Adult-Content Filtering
+    // -------------------------------------------------------------------------
+
+    fun getContentProtectionConfig(): ContentProtectionConfig =
+        fastStore.readContentProtectionConfig()
+
+    fun updateContentProtectionConfig(
+        transform: (ContentProtectionConfig) -> ContentProtectionConfig
+    ): StrictModePolicy.GuardResult {
+        val current = fastStore.readContentProtectionConfig()
+        val updated = transform(current)
+        val strictActive = isStrictModeCurrentlyActive()
+
+        if (strictActive) {
+            if (current.youtubeStudyModeEnabled && !updated.youtubeStudyModeEnabled) {
+                return StrictModePolicy.canDisableContentProtection("YouTube Study Mode", true)
+            }
+            if (current.safeSearchEnabled && !updated.safeSearchEnabled) {
+                return StrictModePolicy.canDisableContentProtection("Universal SafeSearch", true)
+            }
+            if (current.inAppAdultFilterEnabled && !updated.inAppAdultFilterEnabled) {
+                return StrictModePolicy.canDisableContentProtection("In-App Adult Protection", true)
+            }
+            if (!current.youtubeAllowShortsFromApproved && updated.youtubeAllowShortsFromApproved) {
+                return StrictModePolicy.canWeakenContentProtectionRule("YouTube Shorts blocking", true)
+            }
+            if (!current.youtubeAllowLiveFromApproved && updated.youtubeAllowLiveFromApproved) {
+                return StrictModePolicy.canWeakenContentProtectionRule("YouTube Live blocking", true)
+            }
+            if (current.youtubeMaskFeedCards && !updated.youtubeMaskFeedCards) {
+                return StrictModePolicy.canWeakenContentProtectionRule("YouTube feed card masking", true)
+            }
+            if (current.blockUnverifiedSearchEnginesInStrictMode && !updated.blockUnverifiedSearchEnginesInStrictMode) {
+                return StrictModePolicy.canWeakenContentProtectionRule("Unverified search engine blocking", true)
+            }
+            if (current.blockImageSearchInStrictMode && !updated.blockImageSearchInStrictMode) {
+                return StrictModePolicy.canWeakenContentProtectionRule("Strict Mode Image Search blocking", true)
+            }
+            if (current.blockUnfilterableAppsInStrictMode && !updated.blockUnfilterableAppsInStrictMode) {
+                return StrictModePolicy.canWeakenContentProtectionRule("Unfilterable app blocking", true)
+            }
+        }
+
+        fastStore.writeContentProtectionConfig(updated)
+        return StrictModePolicy.GuardResult.Permitted
+    }
+
+    suspend fun lookupYouTubeChannel(rawInput: String): ChannelLookupState {
+        val apiKey = fastStore.readContentProtectionConfig().youtubeDataApiKey
+        return youtubeChannelResolver.resolveInput(rawInput, apiKey)
+    }
+
+    suspend fun verifyManualYouTubeChannelId(rawChannelId: String): ChannelLookupState {
+        val apiKey = fastStore.readContentProtectionConfig().youtubeDataApiKey
+        return youtubeChannelResolver.verifyByPermanentChannelId(rawChannelId, apiKey)
+    }
+
+    /**
+     * Saves an already-verified YouTube channel to the shared offline Room allowlist.
+     * Rejects unverified/malformed UC... IDs, prevents duplicates, and blocks edits during Strict Mode.
+     */
+    suspend fun approveVerifiedYouTubeChannel(
+        channel: VerifiedYouTubeChannel
+    ): StrictModePolicy.GuardResult {
+        val guard = StrictModePolicy.canModifyApprovedYouTubeChannels(isStrictModeCurrentlyActive())
+        if (guard is StrictModePolicy.GuardResult.Denied) return guard
+
+        val cid = channel.channelId.trim()
+        if (!YouTubeStudyEngine.isValidPermanentChannelId(cid)) {
+            return StrictModePolicy.GuardResult.Denied("Channel must have a verified permanent UC... Channel ID before approval.")
+        }
+        val cleanTitle = channel.title.trim()
+        if (cleanTitle.isEmpty()) {
+            return StrictModePolicy.GuardResult.Denied("Channel identity could not be verified.")
+        }
+
+        val existing = dao.getApprovedYouTubeChannelById(cid)
+        if (existing != null) {
+            return StrictModePolicy.GuardResult.Denied("\"${existing.title}\" is already in your approved channels list.")
+        }
+
+        dao.upsertApprovedYouTubeChannel(
+            ApprovedYouTubeChannelEntity(
+                channelId = cid,
+                handle = YouTubeStudyEngine.normalizeHandle(channel.handle),
+                title = cleanTitle,
+                avatarUrl = channel.avatarUrl.trim(),
+                subscriberSummary = channel.subscriberSummary.trim(),
+                verifiedSource = channel.verifiedSource.name,
+                verifiedAtMs = System.currentTimeMillis()
+            )
+        )
+        syncApprovedYouTubeChannelsToFastStore()
+        return StrictModePolicy.GuardResult.Permitted
+    }
+
+    suspend fun removeApprovedYouTubeChannel(channelId: String): StrictModePolicy.GuardResult {
+        val guard = StrictModePolicy.canModifyApprovedYouTubeChannels(isStrictModeCurrentlyActive())
+        if (guard is StrictModePolicy.GuardResult.Denied) return guard
+
+        dao.deleteApprovedYouTubeChannel(channelId)
+        syncApprovedYouTubeChannelsToFastStore()
+        return StrictModePolicy.GuardResult.Permitted
+    }
+
+    suspend fun verifyAndCacheDirectVideoChannel(videoId: String): String? {
+        dao.getCachedVideoChannel(videoId)?.let { cached ->
+            fastStore.putVerifiedVideoChannelInFastCache(videoId, cached.channelId)
+            return cached.channelId
+        }
+        val apiKey = fastStore.readContentProtectionConfig().youtubeDataApiKey
+        val resolved = youtubeChannelResolver.resolveVideoToPermanentChannelId(videoId, apiKey)
+            ?: return null
+        val (channelId, title) = resolved
+        dao.upsertVideoChannelCache(
+            YouTubeVideoChannelCacheEntity(
+                videoId = videoId,
+                channelId = channelId,
+                channelTitle = title,
+                verifiedAtMs = System.currentTimeMillis()
+            )
+        )
+        fastStore.putVerifiedVideoChannelInFastCache(videoId, channelId)
+        return channelId
+    }
+
+    suspend fun syncApprovedYouTubeChannelsToFastStore() {
+        val channels = dao.getAllApprovedYouTubeChannels()
+        val videoCache = dao.getRecentVideoChannelCache().associate { it.videoId to it.channelId }
+        fastStore.writeApprovedChannelsSnapshot(channels, videoCache)
+    }
+
+    suspend fun ensureDefaultSafeSearchRulesSeeded() {
+        if (dao.countSafeSearchProviderRules() == 0) {
+            val entities = SafeSearchEngine.DEFAULT_PROVIDER_RULES.map { it.toEntity() }
+            dao.upsertSafeSearchProviderRules(entities)
+        }
+        val persisted = dao.getAllSafeSearchProviderRules().map { it.toDomain() }
+        if (persisted.isNotEmpty()) {
+            fastStore.updateSafeSearchRulesInMemory(persisted)
+        }
+    }
+
+    suspend fun refreshSafeSearchProviderRules(): Int {
+        // Re-seeds any newly added built-in provider rules while preserving existing entries safely
+        val existingIds = dao.getAllSafeSearchProviderRules().map { it.providerId }.toSet()
+        val missingOrRefreshed = SafeSearchEngine.DEFAULT_PROVIDER_RULES.map { it.toEntity() }
+        if (missingOrRefreshed.isNotEmpty()) {
+            dao.upsertSafeSearchProviderRules(missingOrRefreshed)
+        }
+        val all = dao.getAllSafeSearchProviderRules().map { it.toDomain() }
+        if (all.isNotEmpty()) {
+            fastStore.updateSafeSearchRulesInMemory(all)
+        }
+        return (all.size - existingIds.size).coerceAtLeast(0)
+    }
+
+    private fun SafeSearchProviderRule.toEntity(): SafeSearchProviderRuleEntity =
+        SafeSearchProviderRuleEntity(
+            providerId = providerId,
+            displayName = displayName,
+            hostsCsv = hosts.joinToString(","),
+            searchPathsCsv = searchPaths.joinToString(","),
+            strictParamKey = strictParamKey,
+            strictParamValue = strictParamValue,
+            unsafeParamValuesCsv = unsafeParamValues.joinToString(","),
+            settingsPathsCsv = settingsPaths.joinToString(","),
+            imageIndicatorsCsv = imageIndicators.joinToString(","),
+            enforceMethod = enforceMethod.name,
+            updatedAtMs = System.currentTimeMillis()
+        )
+
+    private fun SafeSearchProviderRuleEntity.toDomain(): SafeSearchProviderRule =
+        SafeSearchProviderRule(
+            providerId = providerId,
+            displayName = displayName,
+            hosts = hostsCsv.split(',').map { it.trim() }.filter { it.isNotEmpty() },
+            searchPaths = searchPathsCsv.split(',').map { it.trim() }.filter { it.isNotEmpty() },
+            strictParamKey = strictParamKey,
+            strictParamValue = strictParamValue,
+            unsafeParamValues = unsafeParamValuesCsv.split(',').map { it.trim() }.filter { it.isNotEmpty() },
+            settingsPaths = settingsPathsCsv.split(',').map { it.trim() }.filter { it.isNotEmpty() },
+            imageIndicators = imageIndicatorsCsv.split(',').map { it.trim() }.filter { it.isNotEmpty() },
+            enforceMethod = SafeSearchEnforceMethod.fromName(enforceMethod)
+        )
 }

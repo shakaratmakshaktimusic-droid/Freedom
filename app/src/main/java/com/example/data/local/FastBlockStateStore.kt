@@ -193,6 +193,127 @@ class FastBlockStateStore(context: Context) {
         prefs.edit().putLong(KEY_LAST_FILTER_SYNC_MS, timestampMs).apply()
     }
 
+    // --- Always-On Content Protection Config & Fast Channel Allowlist Snapshot (<1ms reads) ---
+    @Volatile
+    private var cachedContentProtectionConfig: com.example.domain.ContentProtectionConfig? = null
+
+    @Volatile
+    private var cachedApprovedChannels: com.example.domain.YouTubeStudyEngine.ApprovedChannelSnapshot? = null
+
+    @Volatile
+    private var cachedSafeSearchRules: List<com.example.domain.SafeSearchProviderRule> =
+        com.example.domain.SafeSearchEngine.DEFAULT_PROVIDER_RULES
+
+    fun readContentProtectionConfig(): com.example.domain.ContentProtectionConfig {
+        cachedContentProtectionConfig?.let { return it }
+        synchronized(stateLock) {
+            cachedContentProtectionConfig?.let { return it }
+            val loaded = com.example.domain.ContentProtectionConfig(
+                youtubeStudyModeEnabled = prefs.getBoolean(KEY_YT_STUDY_MODE, false),
+                youtubeMaskFeedCards = prefs.getBoolean(KEY_YT_MASK_FEED_CARDS, true),
+                youtubeAllowShortsFromApproved = prefs.getBoolean(KEY_YT_ALLOW_SHORTS, false),
+                youtubeAllowLiveFromApproved = prefs.getBoolean(KEY_YT_ALLOW_LIVE, false),
+                youtubeDataApiKey = prefs.getString(KEY_YT_API_KEY, "") ?: "",
+                safeSearchEnabled = prefs.getBoolean(KEY_SAFE_SEARCH_ENABLED, false),
+                blockUnverifiedSearchEnginesInStrictMode = prefs.getBoolean(KEY_BLOCK_UNVERIFIED_SEARCH, true),
+                inAppAdultFilterEnabled = prefs.getBoolean(KEY_IN_APP_ADULT_FILTER, false),
+                blockImageSearchInStrictMode = prefs.getBoolean(KEY_BLOCK_IMAGE_SEARCH_STRICT, false),
+                blockUnfilterableAppsInStrictMode = prefs.getBoolean(KEY_BLOCK_UNFILTERABLE_APPS_STRICT, false)
+            )
+            cachedContentProtectionConfig = loaded
+            return loaded
+        }
+    }
+
+    fun writeContentProtectionConfig(config: com.example.domain.ContentProtectionConfig) = synchronized(stateLock) {
+        prefs.edit()
+            .putBoolean(KEY_YT_STUDY_MODE, config.youtubeStudyModeEnabled)
+            .putBoolean(KEY_YT_MASK_FEED_CARDS, config.youtubeMaskFeedCards)
+            .putBoolean(KEY_YT_ALLOW_SHORTS, config.youtubeAllowShortsFromApproved)
+            .putBoolean(KEY_YT_ALLOW_LIVE, config.youtubeAllowLiveFromApproved)
+            .putString(KEY_YT_API_KEY, config.youtubeDataApiKey.trim())
+            .putBoolean(KEY_SAFE_SEARCH_ENABLED, config.safeSearchEnabled)
+            .putBoolean(KEY_BLOCK_UNVERIFIED_SEARCH, config.blockUnverifiedSearchEnginesInStrictMode)
+            .putBoolean(KEY_IN_APP_ADULT_FILTER, config.inAppAdultFilterEnabled)
+            .putBoolean(KEY_BLOCK_IMAGE_SEARCH_STRICT, config.blockImageSearchInStrictMode)
+            .putBoolean(KEY_BLOCK_UNFILTERABLE_APPS_STRICT, config.blockUnfilterableAppsInStrictMode)
+            .apply()
+        cachedContentProtectionConfig = config
+    }
+
+    fun readApprovedChannelsSnapshot(): com.example.domain.YouTubeStudyEngine.ApprovedChannelSnapshot {
+        cachedApprovedChannels?.let { return it }
+        synchronized(stateLock) {
+            cachedApprovedChannels?.let { return it }
+            val ids = prefs.getStringSet(KEY_APPROVED_YT_IDS, emptySet())?.toSet() ?: emptySet()
+            val handles = prefs.getStringSet(KEY_APPROVED_YT_HANDLES, emptySet())?.toSet() ?: emptySet()
+            val titles = prefs.getStringSet(KEY_APPROVED_YT_TITLES, emptySet())?.toSet() ?: emptySet()
+            val vidPairs = prefs.getStringSet(KEY_YT_VIDEO_CACHE_PAIRS, emptySet()).orEmpty()
+            val vidMap = HashMap<String, String>(vidPairs.size)
+            for (pair in vidPairs) {
+                val sep = pair.indexOf('|')
+                if (sep > 0 && sep < pair.lastIndex) {
+                    vidMap[pair.substring(0, sep)] = pair.substring(sep + 1)
+                }
+            }
+            val loaded = com.example.domain.YouTubeStudyEngine.ApprovedChannelSnapshot(
+                channelIds = ids,
+                normalizedHandles = handles,
+                normalizedTitles = titles,
+                videoToChannelIdCache = vidMap
+            )
+            cachedApprovedChannels = loaded
+            return loaded
+        }
+    }
+
+    fun writeApprovedChannelsSnapshot(
+        channels: List<ApprovedYouTubeChannelEntity>,
+        videoCache: Map<String, String> = readApprovedChannelsSnapshot().videoToChannelIdCache
+    ) = synchronized(stateLock) {
+        val ids = HashSet<String>(channels.size)
+        val handles = HashSet<String>(channels.size)
+        val titles = HashSet<String>(channels.size)
+        for (ch in channels) {
+            ids.add(ch.channelId.trim())
+            val h = com.example.domain.YouTubeStudyEngine.normalizeHandle(ch.handle)
+            if (h.isNotEmpty()) handles.add(h)
+            val t = com.example.domain.YouTubeStudyEngine.normalizeChannelTitle(ch.title)
+            if (t.isNotEmpty()) titles.add(t)
+        }
+        val pairs = videoCache.entries.take(300).map { "${it.key}|${it.value}" }.toSet()
+        prefs.edit()
+            .putStringSet(KEY_APPROVED_YT_IDS, ids)
+            .putStringSet(KEY_APPROVED_YT_HANDLES, handles)
+            .putStringSet(KEY_APPROVED_YT_TITLES, titles)
+            .putStringSet(KEY_YT_VIDEO_CACHE_PAIRS, pairs)
+            .apply()
+        cachedApprovedChannels = com.example.domain.YouTubeStudyEngine.ApprovedChannelSnapshot(
+            channelIds = ids,
+            normalizedHandles = handles,
+            normalizedTitles = titles,
+            videoToChannelIdCache = HashMap(videoCache)
+        )
+    }
+
+    fun putVerifiedVideoChannelInFastCache(videoId: String, channelId: String) = synchronized(stateLock) {
+        val current = readApprovedChannelsSnapshot()
+        if (current.videoToChannelIdCache[videoId] == channelId) return@synchronized
+        val updatedMap = HashMap(current.videoToChannelIdCache)
+        updatedMap[videoId] = channelId
+        val pairs = updatedMap.entries.take(300).map { "${it.key}|${it.value}" }.toSet()
+        prefs.edit().putStringSet(KEY_YT_VIDEO_CACHE_PAIRS, pairs).apply()
+        cachedApprovedChannels = current.copy(videoToChannelIdCache = updatedMap)
+    }
+
+    fun getSafeSearchRules(): List<com.example.domain.SafeSearchProviderRule> = cachedSafeSearchRules
+
+    fun updateSafeSearchRulesInMemory(rules: List<com.example.domain.SafeSearchProviderRule>) {
+        if (rules.isNotEmpty()) {
+            cachedSafeSearchRules = rules
+        }
+    }
+
     companion object {
         private const val PREFS_NAME = "freedom_fast_block_state_v3"
         private const val KEY_IS_ACTIVE = "is_active"
@@ -216,5 +337,21 @@ class FastBlockStateStore(context: Context) {
         private const val KEY_AUTO_DETECT_UNKNOWN = "auto_detect_unknown"
         private const val KEY_FILTER_UPDATE_FREQ = "filter_update_freq"
         private const val KEY_LAST_FILTER_SYNC_MS = "last_filter_sync_ms"
+
+        // Content Protection Keys
+        private const val KEY_YT_STUDY_MODE = "cp_yt_study_mode"
+        private const val KEY_YT_MASK_FEED_CARDS = "cp_yt_mask_feed_cards"
+        private const val KEY_YT_ALLOW_SHORTS = "cp_yt_allow_shorts"
+        private const val KEY_YT_ALLOW_LIVE = "cp_yt_allow_live"
+        private const val KEY_YT_API_KEY = "cp_yt_api_key"
+        private const val KEY_SAFE_SEARCH_ENABLED = "cp_safe_search_enabled"
+        private const val KEY_BLOCK_UNVERIFIED_SEARCH = "cp_block_unverified_search"
+        private const val KEY_IN_APP_ADULT_FILTER = "cp_in_app_adult_filter"
+        private const val KEY_BLOCK_IMAGE_SEARCH_STRICT = "cp_block_image_search_strict"
+        private const val KEY_BLOCK_UNFILTERABLE_APPS_STRICT = "cp_block_unfilterable_apps_strict"
+        private const val KEY_APPROVED_YT_IDS = "cp_approved_yt_ids"
+        private const val KEY_APPROVED_YT_HANDLES = "cp_approved_yt_handles"
+        private const val KEY_APPROVED_YT_TITLES = "cp_approved_yt_titles"
+        private const val KEY_YT_VIDEO_CACHE_PAIRS = "cp_yt_video_cache_pairs"
     }
 }

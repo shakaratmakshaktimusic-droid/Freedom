@@ -86,6 +86,7 @@ fun TodayScreen(
     onExtendSession: (Int) -> Unit,
     onToggleSchedule: (ScheduleEntity, Boolean) -> Unit,
     onOpenSettingsPermissions: () -> Unit,
+    onOpenContentProtection: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val g = FreedomGlass.colors
@@ -193,6 +194,73 @@ fun TodayScreen(
                     onClick = onStartSessionClick,
                     testTag = "today_start_session_button"
                 )
+            }
+        }
+
+        // Always-On Content Protection Quick Card
+        item(key = "today_content_protection_card") {
+            val cp = uiState.contentProtection
+            val activeCount = listOf(
+                cp.youtubeStudyModeEnabled,
+                cp.safeSearchEnabled,
+                cp.inAppAdultFilterEnabled
+            ).count { it }
+            val summaryText = buildString {
+                if (activeCount == 0) {
+                    append("YouTube Study Mode · SafeSearch · Adult Filter")
+                } else {
+                    val activeNames = buildList {
+                        if (cp.youtubeStudyModeEnabled) add("Study Mode (${uiState.approvedYouTubeChannels.size} ch)")
+                        if (cp.safeSearchEnabled) add("SafeSearch")
+                        if (cp.inAppAdultFilterEnabled) add("Adult Filter")
+                    }
+                    append(activeNames.joinToString(" · "))
+                }
+            }
+
+            GlassCard(
+                accentBorderColor = if (activeCount > 0) g.shieldActive else null,
+                contentPadding = PaddingValues(horizontal = 18.dp, vertical = 14.dp),
+                onClick = onOpenContentProtection,
+                modifier = Modifier.testTag("today_content_protection_card")
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(38.dp)
+                            .clip(CircleShape)
+                            .background(if (activeCount > 0) g.shieldActive.copy(alpha = 0.16f) else g.primarySoft),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Shield,
+                            contentDescription = "Content Protection",
+                            tint = if (activeCount > 0) g.shieldActive else g.primaryAccent,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Content Protection",
+                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                            color = g.textPrimary
+                        )
+                        Text(
+                            text = summaryText,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = g.textSecondary
+                        )
+                    }
+                    Text(
+                        text = if (activeCount > 0) "$activeCount On" else "Set Up",
+                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                        color = if (activeCount > 0) g.shieldActive else g.primaryAccent
+                    )
+                }
             }
         }
 

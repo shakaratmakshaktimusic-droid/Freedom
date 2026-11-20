@@ -9,19 +9,26 @@ import com.example.FreedomApplication
 import com.example.blocker.FreedomAccessibilityService
 import com.example.blocker.GuardPermissionStatus
 import com.example.data.local.AllowedWebsiteEntity
+import com.example.data.local.ApprovedYouTubeChannelEntity
 import com.example.data.local.BlockEventEntity
 import com.example.data.local.BlocklistAllowedAppEntity
 import com.example.data.local.BlocklistProfileEntity
 import com.example.data.local.CustomBlockedWebsiteEntity
 import com.example.data.local.FocusSessionEntity
+import com.example.data.local.SafeSearchProviderRuleEntity
 import com.example.data.local.ScheduleEntity
 import com.example.data.repository.InstalledAppInfo
 import com.example.data.sync.FilterSyncUiState
+import com.example.domain.ChannelLookupState
+import com.example.domain.ContentProtectionConfig
 import com.example.domain.DndMode
 import com.example.domain.FilterUpdateFrequency
 import com.example.domain.StrictModePolicy
 import com.example.domain.ThemeMode
+import com.example.domain.VerifiedYouTubeChannel
 import com.example.domain.WebsiteCategory
+import com.example.domain.YouTubeClientProfile
+import com.example.domain.YouTubeClientRegistry
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -57,7 +64,11 @@ data class FreedomUiState(
     val dndMode: DndMode = DndMode.PRIORITY_ONLY,
     val hideBlockedNotifications: Boolean = false,
     val autoDetectUnknownSites: Boolean = true,
-    val filterUpdateFrequency: FilterUpdateFrequency = FilterUpdateFrequency.DAILY
+    val filterUpdateFrequency: FilterUpdateFrequency = FilterUpdateFrequency.DAILY,
+    val contentProtection: ContentProtectionConfig = ContentProtectionConfig(),
+    val approvedYouTubeChannels: List<ApprovedYouTubeChannelEntity> = emptyList(),
+    val detectedYouTubeClients: List<YouTubeClientProfile> = emptyList(),
+    val safeSearchProviderRules: List<SafeSearchProviderRuleEntity> = emptyList()
 ) {
     val isSessionActive: Boolean
         get() = activeSession?.active == true
@@ -93,6 +104,10 @@ class FreedomViewModel(application: Application) : AndroidViewModel(application)
     private val _hideBlockedNotifications = MutableStateFlow(repository.isHideBlockedNotificationsEnabled())
     private val _autoDetectUnknownSites = MutableStateFlow(repository.isAutoDetectUnknownSitesEnabled())
     private val _filterUpdateFrequency = MutableStateFlow(repository.getFilterUpdateFrequency())
+    private val _contentProtection = MutableStateFlow(repository.getContentProtectionConfig())
+
+    private val _channelLookupState = MutableStateFlow<ChannelLookupState>(ChannelLookupState.Idle)
+    val channelLookupState: StateFlow<ChannelLookupState> = _channelLookupState.asStateFlow()
 
     private val _messages = MutableSharedFlow<String>(extraBufferCapacity = 8)
     val messages: SharedFlow<String> = _messages.asSharedFlow()
@@ -177,6 +192,20 @@ class FreedomViewModel(application: Application) : AndroidViewModel(application)
         bundle.copy(filterUpdateFrequency = freq)
     }
 
+    private data class ContentProtectionBundle(
+        val config: ContentProtectionConfig,
+        val approvedChannels: List<ApprovedYouTubeChannelEntity>,
+        val safeSearchRules: List<SafeSearchProviderRuleEntity>
+    )
+
+    private val contentProtectionFlow = combine(
+        _contentProtection,
+        repository.approvedYouTubeChannelsFlow,
+        repository.safeSearchProviderRulesFlow
+    ) { cfg, channels, ssRules ->
+        ContentProtectionBundle(cfg, channels, ssRules)
+    }
+
     private val runtimeFlow = combine(
         _installedApps,
         _isLoadingApps,
@@ -190,9 +219,13 @@ class FreedomViewModel(application: Application) : AndroidViewModel(application)
         coreDbFlow,
         secondaryFlow,
         prefsFlow,
-        runtimeFlow
-    ) { core, sec, prefs, runtime ->
+        runtimeFlow,
+        contentProtectionFlow
+    ) { core, sec, prefs, runtime, cp ->
         val (apps, loading, perms) = runtime
+        val detectedClients = YouTubeClientRegistry.discoverInstalledClients(
+            apps.map { it.packageName to it.label }
+        )
         FreedomUiState(
             activeSession = core.active,
             blocklists = core.blocklists,
@@ -214,14 +247,19 @@ class FreedomViewModel(application: Application) : AndroidViewModel(application)
             dndMode = prefs.dndMode,
             hideBlockedNotifications = prefs.hideBlockedNotifications,
             autoDetectUnknownSites = prefs.autoDetectUnknownSites,
-            filterUpdateFrequency = prefs.filterUpdateFrequency
+            filterUpdateFrequency = prefs.filterUpdateFrequency,
+            contentProtection = cp.config,
+            approvedYouTubeChannels = cp.approvedChannels,
+            detectedYouTubeClients = detectedClients,
+            safeSearchProviderRules = cp.safeSearchRules
         )
     }.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5_000L),
         initialValue = FreedomUiState(
             permissions = permissionChecker.check(),
-            themeMode = repository.getThemeMode()
+            themeMode = repository.getThemeMode(),
+            contentProtection = repository.getContentProtectionConfig()
         )
     )
 
@@ -476,5 +514,127 @@ class FreedomViewModel(application: Application) : AndroidViewModel(application)
     fun setFilterUpdateFrequency(freq: FilterUpdateFrequency) {
         repository.setFilterUpdateFrequency(freq)
         _filterUpdateFrequency.value = freq
+    }
+
+    // -------------------------------------------------------------------------
+    // Advanced Content Protection: YouTube Study Mode, Universal SafeSearch,
+    // In-App Adult-Content Filtering
+    // -------------------------------------------------------------------------
+
+    private fun applyContentProtectionUpdate(
+        transform: (ContentProtectionConfig) -> ContentProtectionConfig
+    ) {
+        when (val res = repository.updateContentProtectionConfig(transform)) {
+            StrictModePolicy.GuardResult.Permitted -> {
+                _contentProtection.value = repository.getContentProtectionConfig()
+                FreedomAccessibilityService.triggerImmediateWindowCheck()
+            }
+            is StrictModePolicy.GuardResult.Denied -> _messages.tryEmit(res.reason)
+        }
+    }
+
+    fun setYouTubeStudyModeEnabled(enabled: Boolean) {
+        applyContentProtectionUpdate { it.copy(youtubeStudyModeEnabled = enabled) }
+    }
+
+    fun setYouTubeMaskFeedCards(enabled: Boolean) {
+        applyContentProtectionUpdate { it.copy(youtubeMaskFeedCards = enabled) }
+    }
+
+    fun setYouTubeAllowShorts(enabled: Boolean) {
+        applyContentProtectionUpdate { it.copy(youtubeAllowShortsFromApproved = enabled) }
+    }
+
+    fun setYouTubeAllowLive(enabled: Boolean) {
+        applyContentProtectionUpdate { it.copy(youtubeAllowLiveFromApproved = enabled) }
+    }
+
+    fun saveYouTubeDataApiKey(apiKey: String) {
+        applyContentProtectionUpdate { it.copy(youtubeDataApiKey = apiKey.trim()) }
+        _messages.tryEmit(
+            if (apiKey.isBlank()) "YouTube Data API v3 fallback key cleared."
+            else "YouTube Data API v3 fallback key saved locally."
+        )
+    }
+
+    fun setSafeSearchEnabled(enabled: Boolean) {
+        applyContentProtectionUpdate { it.copy(safeSearchEnabled = enabled) }
+    }
+
+    fun setBlockUnverifiedSearchEngines(enabled: Boolean) {
+        applyContentProtectionUpdate { it.copy(blockUnverifiedSearchEnginesInStrictMode = enabled) }
+    }
+
+    fun setInAppAdultFilterEnabled(enabled: Boolean) {
+        applyContentProtectionUpdate { it.copy(inAppAdultFilterEnabled = enabled) }
+    }
+
+    fun setBlockImageSearchInStrictMode(enabled: Boolean) {
+        applyContentProtectionUpdate { it.copy(blockImageSearchInStrictMode = enabled) }
+    }
+
+    fun setBlockUnfilterableAppsInStrictMode(enabled: Boolean) {
+        applyContentProtectionUpdate { it.copy(blockUnfilterableAppsInStrictMode = enabled) }
+    }
+
+    fun lookupYouTubeChannel(rawInput: String) {
+        val trimmed = rawInput.trim()
+        if (trimmed.isEmpty()) {
+            _channelLookupState.value = ChannelLookupState.Error(
+                reason = "Enter a YouTube channel URL, video URL, @handle, or channel name.",
+                suggestedFallback = "Example: https://www.youtube.com/@3blue1brown or Khan Academy"
+            )
+            return
+        }
+        viewModelScope.launch {
+            _channelLookupState.value = ChannelLookupState.Loading("Verifying channel identity with YouTube…")
+            _channelLookupState.value = repository.lookupYouTubeChannel(trimmed)
+        }
+    }
+
+    fun verifyManualYouTubeChannelId(rawChannelId: String) {
+        viewModelScope.launch {
+            _channelLookupState.value = ChannelLookupState.Loading("Verifying permanent UC... Channel ID…")
+            _channelLookupState.value = repository.verifyManualYouTubeChannelId(rawChannelId)
+        }
+    }
+
+    fun selectSearchCandidateForConfirmation(channel: VerifiedYouTubeChannel) {
+        _channelLookupState.value = ChannelLookupState.VerifiedCandidate(channel)
+    }
+
+    fun confirmApproveYouTubeChannel(channel: VerifiedYouTubeChannel) {
+        viewModelScope.launch {
+            when (val res = repository.approveVerifiedYouTubeChannel(channel)) {
+                StrictModePolicy.GuardResult.Permitted -> {
+                    _channelLookupState.value = ChannelLookupState.Idle
+                    _messages.tryEmit("Approved \"${channel.title}\" for Study Mode.")
+                }
+                is StrictModePolicy.GuardResult.Denied -> _messages.tryEmit(res.reason)
+            }
+        }
+    }
+
+    fun removeApprovedYouTubeChannel(channelId: String) {
+        viewModelScope.launch {
+            when (val res = repository.removeApprovedYouTubeChannel(channelId)) {
+                StrictModePolicy.GuardResult.Permitted -> _messages.tryEmit("Channel removed from Study Mode.")
+                is StrictModePolicy.GuardResult.Denied -> _messages.tryEmit(res.reason)
+            }
+        }
+    }
+
+    fun resetChannelLookup() {
+        _channelLookupState.value = ChannelLookupState.Idle
+    }
+
+    fun refreshSafeSearchRulesNow() {
+        viewModelScope.launch {
+            val added = repository.refreshSafeSearchProviderRules()
+            _messages.tryEmit(
+                if (added > 0) "SafeSearch provider database updated (+$added providers)."
+                else "SafeSearch provider rules are up to date (${uiState.value.safeSearchProviderRules.size} providers)."
+            )
+        }
     }
 }

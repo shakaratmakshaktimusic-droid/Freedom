@@ -153,4 +153,46 @@ interface FreedomDao {
 
     @Query("DELETE FROM block_events")
     suspend fun clearBlockEvents()
+
+    // --- Approved YouTube Channels (Shared across YouTube, Morphe YT, ReVanced & supported clients) ---
+    @Query("SELECT * FROM approved_youtube_channels ORDER BY title COLLATE NOCASE ASC")
+    fun observeApprovedYouTubeChannels(): Flow<List<ApprovedYouTubeChannelEntity>>
+
+    @Query("SELECT * FROM approved_youtube_channels ORDER BY title COLLATE NOCASE ASC")
+    suspend fun getAllApprovedYouTubeChannels(): List<ApprovedYouTubeChannelEntity>
+
+    @Query("SELECT * FROM approved_youtube_channels WHERE channelId = :channelId LIMIT 1")
+    suspend fun getApprovedYouTubeChannelById(channelId: String): ApprovedYouTubeChannelEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertApprovedYouTubeChannel(channel: ApprovedYouTubeChannelEntity)
+
+    @Query("DELETE FROM approved_youtube_channels WHERE channelId = :channelId")
+    suspend fun deleteApprovedYouTubeChannel(channelId: String)
+
+    // --- Verified Video -> Channel ID Offline Cache ---
+    @Query("SELECT * FROM youtube_video_channel_cache ORDER BY verifiedAtMs DESC LIMIT 500")
+    suspend fun getRecentVideoChannelCache(): List<YouTubeVideoChannelCacheEntity>
+
+    @Query("SELECT * FROM youtube_video_channel_cache WHERE videoId = :videoId LIMIT 1")
+    suspend fun getCachedVideoChannel(videoId: String): YouTubeVideoChannelCacheEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertVideoChannelCache(entry: YouTubeVideoChannelCacheEntity)
+
+    @Query("DELETE FROM youtube_video_channel_cache WHERE verifiedAtMs < :cutoffMs")
+    suspend fun pruneOldVideoChannelCache(cutoffMs: Long)
+
+    // --- Dedicated Universal SafeSearch Provider Rules ---
+    @Query("SELECT * FROM safesearch_provider_rules ORDER BY displayName COLLATE NOCASE ASC")
+    fun observeSafeSearchProviderRules(): Flow<List<SafeSearchProviderRuleEntity>>
+
+    @Query("SELECT * FROM safesearch_provider_rules")
+    suspend fun getAllSafeSearchProviderRules(): List<SafeSearchProviderRuleEntity>
+
+    @Query("SELECT COUNT(*) FROM safesearch_provider_rules")
+    suspend fun countSafeSearchProviderRules(): Int
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertSafeSearchProviderRules(rules: List<SafeSearchProviderRuleEntity>)
 }

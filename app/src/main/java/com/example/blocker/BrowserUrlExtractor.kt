@@ -19,8 +19,14 @@ object BrowserUrlExtractor {
     data class WebInspectionResult(
         val extractedHost: String? = null,
         val extractedFullUrl: String? = null,
+        val rawUrlWithQuery: String? = null, // Kept strictly in RAM only (never persisted or logged)
         val isKnownBrowser: Boolean = false,
         val isCustomTabOrWebView: Boolean = false
+    )
+
+    data class VisibleCardCandidate(
+        val bounds: android.graphics.Rect,
+        val snippets: List<String>
     )
 
     private val BROWSER_URL_BAR_IDS: Map<String, List<String>> = mapOf(
@@ -60,6 +66,11 @@ object BrowserUrlExtractor {
         "url_view", "display_url", "toolbar_url", "webview_url", "title_url"
     )
 
+    private val RAW_URL_REGEX = Regex(
+        pattern = "(?:https?://)?[a-zA-Z0-9-]+(?:\\.[a-zA-Z0-9-]+)+(?::\\d+)?(?:/[^\\s]*)?",
+        option = RegexOption.IGNORE_CASE
+    )
+
     fun isBrowserPackage(packageName: String): Boolean = packageName in KNOWN_BROWSER_PACKAGES
 
     fun inspectWindow(
@@ -90,12 +101,13 @@ object BrowserUrlExtractor {
                 val nodes = runCatching { root.findAccessibilityNodeInfosByViewId(viewId) }.getOrNull()
                 if (!nodes.isNullOrEmpty()) {
                     for (node in nodes) {
-                        val extracted = DomainBlockMatcher.extractUrlFromUiText(node.text?.toString())
-                            ?: DomainBlockMatcher.extractUrlFromUiText(node.contentDescription?.toString())
+                        val rawCandidate = node.text?.toString() ?: node.contentDescription?.toString()
+                        val extracted = DomainBlockMatcher.extractUrlFromUiText(rawCandidate)
                         if (extracted != null) {
                             return WebInspectionResult(
                                 extractedHost = extracted.host,
                                 extractedFullUrl = extracted.fullNormalizedUrl,
+                                rawUrlWithQuery = extractRawUrlWithQuery(rawCandidate),
                                 isKnownBrowser = true,
                                 isCustomTabOrWebView = classLooksLikeWebContainer
                             )
@@ -108,6 +120,7 @@ object BrowserUrlExtractor {
         // 2. Bounded shallow scan for Chrome Custom Tabs, generic browsers, & embedded WebViews
         var hasWebViewNode = classLooksLikeWebContainer
         var foundUrl: DomainBlockMatcher.ExtractedUrl? = null
+        var foundRawUrl: String? = null
 
         val queue = ArrayDeque<Pair<AccessibilityNodeInfo, Int>>()
         queue.add(root to 0)
@@ -133,6 +146,7 @@ object BrowserUrlExtractor {
                         ?: DomainBlockMatcher.extractUrlFromUiText(desc)
                     if (extracted != null) {
                         foundUrl = extracted
+                        foundRawUrl = extractRawUrlWithQuery(txt) ?: extractRawUrlWithQuery(desc)
                     }
                 }
             }
@@ -152,14 +166,23 @@ object BrowserUrlExtractor {
         return WebInspectionResult(
             extractedHost = foundUrl?.host,
             extractedFullUrl = foundUrl?.fullNormalizedUrl,
+            rawUrlWithQuery = foundRawUrl,
             isKnownBrowser = isKnownBrowser,
             isCustomTabOrWebView = hasWebViewNode
         )
     }
 
     /**
+     * Extracts raw URL preserving query parameters in memory (e.g. `safe=active`, `tbm=isch`, `v=...`).
+     */
+    fun extractRawUrlWithQuery(rawText: String?): String? {
+        if (rawText.isNullOrBlank()) return null
+        return RAW_URL_REGEX.find(rawText.trim())?.value
+    }
+
+    /**
      * Collects a strictly bounded sample (max 40 short snippets) of visible text nodes
-     * for UnknownSiteClassifier. Called ONLY once per newly navigated unknown domain.
+     * for UnknownSiteClassifier and InAppAdultFilterEngine.
      */
     fun collectBoundedPageSnippets(root: AccessibilityNodeInfo?, maxSnippets: Int = 40): List<String> {
         if (root == null) return emptyList()
@@ -173,11 +196,11 @@ object BrowserUrlExtractor {
             visited++
 
             val text = node.text?.toString()?.trim()
-            if (!text.isNullOrEmpty() && text.length in 3..140) {
+            if (!text.isNullOrEmpty() && text.length in 3..160) {
                 snippets.add(text)
             } else {
                 val desc = node.contentDescription?.toString()?.trim()
-                if (!desc.isNullOrEmpty() && desc.length in 3..140) {
+                if (!desc.isNullOrEmpty() && desc.length in 3..160) {
                     snippets.add(desc)
                 }
             }
@@ -190,5 +213,72 @@ object BrowserUrlExtractor {
             }
         }
         return snippets
+    }
+
+    /**
+     * Collects bounded visible clickable/card items with screen bounds and text/alt-labels
+     * inside browsers, Google Search, Google Images, or inspectable apps so flagged
+     * adult previews can be covered in-place before interaction.
+     */
+    fun collectBoundedVisibleCards(
+        root: AccessibilityNodeInfo?,
+        screenWidth: Int,
+        screenHeight: Int,
+        maxCards: Int = 18
+    ): List<VisibleCardCandidate> {
+        if (root == null || screenWidth <= 0 || screenHeight <= 0) return emptyList()
+        val out = ArrayList<VisibleCardCandidate>(maxCards)
+        val queue = ArrayDeque<Pair<AccessibilityNodeInfo, Int>>()
+        queue.add(root to 0)
+        var visited = 0
+        val rect = android.graphics.Rect()
+        val minW = (screenWidth * 0.22f).toInt()
+        val minH = (screenHeight * 0.06f).toInt()
+        val maxH = (screenHeight * 0.62f).toInt()
+
+        while (queue.isNotEmpty() && out.size < maxCards && visited < 110) {
+            val (node, depth) = queue.removeFirst()
+            visited++
+
+            val isCandidateContainer = (node.isClickable || node.className?.toString()?.contains("Image", true) == true) &&
+                depth >= 2
+            if (isCandidateContainer) {
+                node.getBoundsInScreen(rect)
+                val onScreen = rect.bottom > 80 && rect.top < screenHeight - 40 &&
+                    rect.width() >= minW && rect.height() in minH..maxH
+                if (onScreen) {
+                    val snippets = collectSmallNodeText(node, limit = 6)
+                    if (snippets.isNotEmpty()) {
+                        out.add(VisibleCardCandidate(android.graphics.Rect(rect), snippets))
+                        continue
+                    }
+                }
+            }
+
+            if (depth < 8 && out.size < maxCards) {
+                val count = node.childCount.coerceAtMost(10)
+                for (i in 0 until count) {
+                    node.getChild(i)?.let { queue.add(it to depth + 1) }
+                }
+            }
+        }
+        return out
+    }
+
+    private fun collectSmallNodeText(node: AccessibilityNodeInfo, limit: Int): List<String> {
+        val result = ArrayList<String>(limit)
+        val stack = ArrayDeque<AccessibilityNodeInfo>()
+        stack.add(node)
+        var scanned = 0
+        while (stack.isNotEmpty() && result.size < limit && scanned < 18) {
+            val curr = stack.removeFirst()
+            scanned++
+            curr.text?.toString()?.trim()?.takeIf { it.length in 2..160 }?.let { result.add(it) }
+            curr.contentDescription?.toString()?.trim()?.takeIf { it.length in 2..160 }?.let { result.add(it) }
+            for (i in 0 until curr.childCount.coerceAtMost(6)) {
+                curr.getChild(i)?.let { stack.add(it) }
+            }
+        }
+        return result
     }
 }
