@@ -522,6 +522,61 @@ class ContentProtectionUnitTest {
     }
 
     @Test
+    fun streamingAggregatorsAndRRatedPirateMovieSites_areBlockedEvenOnUnknownMirrors() {
+        // 1. fmhy.net/video (stream aggregator directory)
+        val fmhyScore = com.example.domain.UnknownSiteClassifier.scoreUnmoderatedStreamingSite(
+            host = "fmhy.net",
+            fullUrl = "https://fmhy.net/video",
+            visibleTextSnippets = listOf(
+                "Stream Aggregators",
+                "Sites that check and play streams within their own custom player exclusively",
+                "Atlantic or fprime - 4K / Dual Audio / External Subs / Ad-Toggle"
+            )
+        )
+        assertTrue("fmhy.net/video must be flagged as an unmoderated streaming aggregator", fmhyScore >= 6)
+
+        // 2. Rotating unknown mirror of a stream aggregator
+        val unknownAggregatorScore = com.example.domain.UnknownSiteClassifier.scoreUnmoderatedStreamingSite(
+            host = "freshmirror99.pages.dev",
+            fullUrl = "https://freshmirror99.pages.dev/video",
+            visibleTextSnippets = listOf(
+                "Stream Aggregators",
+                "4K / Dual Audio / External Subs / Ad-Toggle"
+            )
+        )
+        assertTrue("Unknown rotating stream aggregator mirror must be caught heuristically", unknownAggregatorScore >= 6)
+
+        // 3. atlantic.bz/title/movie/1368337 (pirate movie streaming site with [R] rating badge)
+        val atlanticScore = com.example.domain.UnknownSiteClassifier.scoreUnmoderatedStreamingSite(
+            host = "atlantic.bz",
+            fullUrl = "https://atlantic.bz/title/movie/1368337",
+            visibleTextSnippets = listOf("THE ODYSSEY", "Resume", "2026 2h 53m", "R", "IMDb", "TMDB 8.0", "Join our Discord")
+        )
+        assertTrue("atlantic.bz must be flagged as an unmoderated streaming site", atlanticScore >= 6)
+
+        val unknownMovieMirrorScore = com.example.domain.UnknownSiteClassifier.scoreUnmoderatedStreamingSite(
+            host = "newstream77.bz",
+            fullUrl = "https://newstream77.bz/title/movie/1368337",
+            visibleTextSnippets = listOf("THE ODYSSEY", "Resume", "IMDb", "TMDB 8.0", "Join our Discord")
+        )
+        assertTrue("Unknown rotating movie mirror must be caught heuristically", unknownMovieMirrorScore >= 6)
+
+        // 4. R-rated movie streaming page caught by InAppAdultFilterEngine
+        val rRatedMoviePage = InAppAdultFilterEngine.evaluateActiveContent(
+            urlOrQuery = "https://atlantic.bz/title/movie/1368337",
+            visibleSnippets = listOf("THE ODYSSEY", "Resume", "2026 2h 53m", "R", "IMDb", "TMDB 8.0", "Director: Christopher Nolan")
+        )
+        assertTrue("R-rated movie streaming page must be flagged by mature-media filter", rRatedMoviePage.isFlagged)
+
+        // 5. Safe educational page mentioning the letter "R" (e.g. R programming) is NOT false-flagged
+        val rProgramming = InAppAdultFilterEngine.evaluateActiveContent(
+            urlOrQuery = "https://www.r-project.org/about.html",
+            visibleSnippets = listOf("The R Project for Statistical Computing", "R", "Data analysis and graphics")
+        )
+        assertFalse("Normal non-movie page containing 'R' must not be falsely flagged", rProgramming.isFlagged)
+    }
+
+    @Test
     fun strictModePolicy_locksContentProtectionChanges() {
         assertTrue(
             StrictModePolicy.canDisableContentProtection("YouTube Study Mode", true) is StrictModePolicy.GuardResult.Denied

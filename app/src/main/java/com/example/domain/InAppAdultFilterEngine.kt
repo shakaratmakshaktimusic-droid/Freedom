@@ -160,6 +160,8 @@ object InAppAdultFilterEngine {
         "u/a 18+",
         "a-rated",
         "rated a ",
+        "r-rated",
+        "rated r",
         "tv-ma",
         "nc-17",
         "adults only",
@@ -172,6 +174,15 @@ object InAppAdultFilterEngine {
         "18+ movie",
         "18+ scene"
     )
+
+    // Movie/streaming page metadata cues used to verify a standalone "R" or "A" certification chip
+    // (e.g. `2026 2h 53m [R] IMDb TMDB 8.0` on movie streaming sites) without false-flagging normal pages.
+    private val MOVIE_RATING_CONTEXT_MARKERS = listOf(
+        "imdb", "tmdb", "/title/movie/", "/title/tv/", "/watch/movie/",
+        "director:", "watch now", "resume", "full movie", "trailer",
+        "stream aggregators", "4k / dual audio"
+    )
+    private val STANDALONE_R_OR_A_CHIP_REGEX = Regex("(^|\\s)(r|a)(\\s|$)")
 
     // STRICTLY Spiritual & Anti-Addiction Recovery framing ONLY (NO biology/anatomy/medical loophole!)
     private val SPIRITUAL_OR_RECOVERY_CONTEXT_TERMS = listOf(
@@ -251,6 +262,26 @@ object InAppAdultFilterEngine {
         }
 
         if (visibleSnippets.isEmpty()) return DetectionResult(false, 0)
+
+        // Check holistic mature-movie rating chip (e.g., standalone "R" or "A" badge paired with
+        // IMDb/TMDB/movie streaming metadata such as `2026 2h 53m [R] IMDb TMDB 8.0`).
+        val normalizedAll = normalizeUnicodeForMatching(combinedContext)
+        val hasStandaloneMaturityChip = visibleSnippets.take(40).any { snippet ->
+            val s = snippet.trim().lowercase()
+            s == "r" || s == "a" || s == "18+" || s == "nc-17" || s == "tv-ma" ||
+                (s.length <= 28 && STANDALONE_R_OR_A_CHIP_REGEX.containsMatchIn(s) &&
+                    (s.contains("20") || s.contains("19") || s.contains("h ") || s.contains("m ")))
+        }
+        if (hasStandaloneMaturityChip) {
+            val movieContextHits = MOVIE_RATING_CONTEXT_MARKERS.count { normalizedAll.contains(it) }
+            if (movieContextHits >= 2) {
+                return DetectionResult(
+                    isFlagged = true,
+                    confidenceScore = 5,
+                    reason = "Mature (R/18+/A-rated) movie or stream filtered by Freedom"
+                )
+            }
+        }
 
         var totalScore = 0
         var flaggedSnippets = 0

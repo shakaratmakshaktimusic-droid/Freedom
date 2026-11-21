@@ -23,6 +23,7 @@ import com.example.domain.DomainBlockMatcher
 import com.example.domain.InAppAdultFilterEngine
 import com.example.domain.SafeSearchEngine
 import com.example.domain.UnknownSiteClassifier
+import com.example.domain.WebsiteCategory
 import com.example.domain.YouTubeClientRegistry
 import com.example.domain.YouTubeStudyEngine
 import java.util.concurrent.ConcurrentHashMap
@@ -162,6 +163,7 @@ class FreedomAccessibilityService : AccessibilityService() {
                 triggerPackage = triggerPackage,
                 triggerClassName = triggerClassName,
                 contentConfig = contentConfig,
+                allowedWebPatterns = snapshot.allowedWebPatterns,
                 strictMode = false,
                 sessionId = -1L,
                 screenWidth = screenWidth,
@@ -319,6 +321,7 @@ class FreedomAccessibilityService : AccessibilityService() {
                     triggerPackage = triggerPackage,
                     triggerClassName = triggerClassName,
                     contentConfig = contentConfig,
+                    allowedWebPatterns = snapshot.allowedWebPatterns,
                     strictMode = isStrictActive,
                     sessionId = snapshot.sessionId,
                     screenWidth = screenWidth,
@@ -863,6 +866,7 @@ class FreedomAccessibilityService : AccessibilityService() {
         triggerPackage: String?,
         triggerClassName: String?,
         contentConfig: ContentProtectionConfig,
+        allowedWebPatterns: Set<String>,
         strictMode: Boolean,
         sessionId: Long,
         screenWidth: Int,
@@ -1185,9 +1189,33 @@ class FreedomAccessibilityService : AccessibilityService() {
                     }
                 }
 
-                // B3. Silent Always-On Multilingual & Mature-Media Adult Filter (Direct Back Cut — Zero Overlays!)
+                // B3. Silent Always-On Adult Domain Index + Unmoderated Pirate Streaming/Aggregator Defense
+                //     + Multilingual & Mature-Media Filter (Direct Back Cut — Zero Overlays!)
+                val extractedHost = webInfo.extractedHost
+                val fullUrl = webInfo.extractedFullUrl ?: rawUrl
+                val isUserAllowlisted = !extractedHost.isNullOrBlank() &&
+                    DomainBlockMatcher.isAllowedByWebsiteAllowlist(
+                        extractedHost,
+                        fullUrl,
+                        allowedWebPatterns
+                    )
+
+                if (!isUserAllowlisted && !extractedHost.isNullOrBlank()) {
+                    // Instant <0.01ms check against built-in + synced community Adult blocklists
+                    if (container.domainIndex.containsDomain(extractedHost, setOf(WebsiteCategory.ADULT)) != null) {
+                        enforceContentProtectionEviction(
+                            blockedPackage = pkg,
+                            navigateHome = false,
+                            reason = "Adult domain blocked by always-on protection",
+                            notificationText = "Adult site blocked by Freedom.",
+                            sessionId = sessionId
+                        )
+                        return
+                    }
+                }
+
                 val queryCheck = InAppAdultFilterEngine.evaluateQueryOrUrl(activeSearchQuery ?: rawUrl)
-                if (queryCheck.isFlagged) {
+                if (!isUserAllowlisted && queryCheck.isFlagged) {
                     enforceContentProtectionEviction(
                         blockedPackage = pkg,
                         navigateHome = false,
@@ -1198,18 +1226,47 @@ class FreedomAccessibilityService : AccessibilityService() {
                     return
                 }
 
-                // Inspect visible page / search-result snippets directly (NO floating overlay masks!)
-                val pageSnippets = BrowserUrlExtractor.collectBoundedPageSnippets(root, maxSnippets = 28)
+                // Inspect visible page / search-result DOM snippets (deep enough for Chrome WebViews)
+                val pageSnippets = BrowserUrlExtractor.collectBoundedPageSnippets(root, maxSnippets = 48)
+
+                // Detect unmoderated pirate movie/TV streaming mirrors & stream-aggregator hubs
+                // (e.g., fmhy.net/video, atlantic.bz/title/movie/..., rotating .bz/.to/.cc mirrors)
+                if (!isUserAllowlisted && !extractedHost.isNullOrBlank()) {
+                    val streamScore = UnknownSiteClassifier.scoreUnmoderatedStreamingSite(
+                        host = extractedHost,
+                        fullUrl = fullUrl ?: extractedHost,
+                        visibleTextSnippets = pageSnippets
+                    )
+                    if (streamScore >= 6) {
+                        val normHost = DomainBlockMatcher.normalizeDomain(extractedHost)
+                        if (normHost != null) {
+                            val hash64 = DomainBlockMatcher.fnv1a64(normHost)
+                            container.domainIndex.addAutoLearnedHash(WebsiteCategory.TV_VIDEO, hash64)
+                            serviceScope.launch {
+                                container.repository.recordAutoLearnedDomainHash(hash64, WebsiteCategory.TV_VIDEO)
+                            }
+                        }
+                        enforceContentProtectionEviction(
+                            blockedPackage = pkg,
+                            navigateHome = false,
+                            reason = "Unmoderated streaming or aggregator site filtered",
+                            notificationText = "Unmoderated streaming site blocked by Freedom.",
+                            sessionId = sessionId
+                        )
+                        return
+                    }
+                }
+
                 val pageCheck = InAppAdultFilterEngine.evaluateActiveContent(
                     urlOrQuery = activeSearchQuery ?: rawUrl,
                     visibleSnippets = pageSnippets
                 )
-                if (pageCheck.isFlagged) {
+                if (!isUserAllowlisted && pageCheck.isFlagged) {
                     enforceContentProtectionEviction(
                         blockedPackage = pkg,
                         navigateHome = false,
-                        reason = "Inappropriate search results or page filtered",
-                        notificationText = "Inappropriate content filtered by Freedom.",
+                        reason = pageCheck.reason.ifBlank { "Inappropriate search results or page filtered" },
+                        notificationText = "Inappropriate or mature content filtered by Freedom.",
                         sessionId = sessionId
                     )
                     return
@@ -1447,6 +1504,8 @@ class FreedomAccessibilityService : AccessibilityService() {
             scheduleBackgroundProcessKill(blockedPackage)
         } else {
             performGlobalAction(GLOBAL_ACTION_BACK)
+            // Follow-up check in case the blocked page used an in-page redirect hop
+            mainHandler.postDelayed({ recheckActiveWindowsNow() }, 420L)
         }
 
         FreedomBlockNotifier.showBlockedAlert(

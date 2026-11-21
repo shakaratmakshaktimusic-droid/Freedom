@@ -180,33 +180,37 @@ object BrowserUrlExtractor {
         return RAW_URL_REGEX.find(rawText.trim())?.value
     }
 
+    private val SHORT_IMPORTANT_TOKENS = setOf("r", "a", "x", "18", "18+", "nc-17", "tv-ma")
+
     /**
-     * Collects a strictly bounded sample (max 40 short snippets) of visible text nodes
+     * Collects a strictly bounded sample (max 48 short snippets) of visible text nodes
      * for UnknownSiteClassifier and InAppAdultFilterEngine.
+     * Reaches deep enough into Chrome/browser WebView DOM hierarchies (depth <= 16)
+     * while preserving short maturity badges ("R", "A", "18+") and truncating long paragraphs.
      */
-    fun collectBoundedPageSnippets(root: AccessibilityNodeInfo?, maxSnippets: Int = 40): List<String> {
+    fun collectBoundedPageSnippets(root: AccessibilityNodeInfo?, maxSnippets: Int = 48): List<String> {
         if (root == null) return emptyList()
         val snippets = ArrayList<String>(maxSnippets)
         val queue = ArrayDeque<Pair<AccessibilityNodeInfo, Int>>()
         queue.add(root to 0)
         var visited = 0
 
-        while (queue.isNotEmpty() && snippets.size < maxSnippets && visited < 90) {
+        while (queue.isNotEmpty() && snippets.size < maxSnippets && visited < 220) {
             val (node, depth) = queue.removeFirst()
             visited++
 
             val text = node.text?.toString()?.trim()
-            if (!text.isNullOrEmpty() && text.length in 3..160) {
-                snippets.add(text)
+            if (!text.isNullOrEmpty() && (text.length >= 2 || text.lowercase() in SHORT_IMPORTANT_TOKENS)) {
+                snippets.add(text.take(240))
             } else {
                 val desc = node.contentDescription?.toString()?.trim()
-                if (!desc.isNullOrEmpty() && desc.length in 3..160) {
-                    snippets.add(desc)
+                if (!desc.isNullOrEmpty() && (desc.length >= 2 || desc.lowercase() in SHORT_IMPORTANT_TOKENS)) {
+                    snippets.add(desc.take(240))
                 }
             }
 
-            if (depth < 7 && snippets.size < maxSnippets) {
-                val childCount = node.childCount.coerceAtMost(12)
+            if (depth < 16 && snippets.size < maxSnippets) {
+                val childCount = node.childCount.coerceAtMost(16)
                 for (i in 0 until childCount) {
                     node.getChild(i)?.let { queue.add(it to depth + 1) }
                 }

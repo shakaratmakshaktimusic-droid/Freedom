@@ -179,11 +179,28 @@ object WebsiteCatalog {
             "nykaa.com", "ikea.com", "wayfair.com", "shopify.com", "wish.com", "slickdeals.net"
         ),
         WebsiteCategory.TV_VIDEO to setOf(
+            // Mainstream OTT & video platforms
             "youtube.com", "youtu.be", "tiktok.com", "netflix.com", "twitch.tv",
             "disneyplus.com", "hotstar.com", "jiocinema.com", "primevideo.com",
             "hulu.com", "max.com", "hbomax.com", "peacocktv.com", "paramountplus.com",
             "crunchyroll.com", "vimeo.com", "dailymotion.com", "rumble.com", "kick.com",
-            "sonyliv.com", "zee5.com", "bilibili.com", "plex.tv", "pluto.tv"
+            "sonyliv.com", "zee5.com", "bilibili.com", "plex.tv", "pluto.tv",
+            // Unmoderated free movie/TV streaming mirrors & piracy stream aggregators
+            "fmhy.net", "fmhy.pages.dev", "fmhy.xyz", "rentry.co",
+            "atlantic.bz", "fprime.to", "shuttletv.to", "flystream.to", "vivarium.to",
+            "arrowtv.to", "cinezo.net", "cinezo.to", "movy.to",
+            "123movies.to", "fmovies.to", "fmoviesz.to", "fmovies24.to",
+            "hdtoday.tv", "hdtoday.cc", "hdtodayz.to", "flixhq.to", "sflix.to",
+            "braflix.ru", "braflix.gd", "braflix.st", "binged.live",
+            "vidsrc.to", "vidsrc.xyz", "vidsrc.me", "vidsrc.cc",
+            "soap2day.to", "soap2dayx.to", "hurawatch.cc", "hurawatchz.to",
+            "lookmovie2.to", "moviesjoy.to", "moviesjoy.is", "myflixerz.to", "myflixer.to",
+            "cineb.rs", "bflix.to", "bflixhd.to", "solarmovie.pe", "putlocker.pe",
+            "watchseries.pe", "watchseriesx.to", "gomovies.sx", "himovies.sx",
+            "netmirror.app", "vegamovies.nl", "vegamovies.rs", "hdhub4u.tv", "hdhub4u.com",
+            "bollyflix.to", "filmyzilla.com", "katmoviehd.to", "moviesmod.org",
+            "hianime.to", "aniwatchtv.to", "gogoanime3.co", "kisskh.co", "dramacool.pa",
+            "yts.mx", "1337x.to", "thepiratebay.org"
         ),
         WebsiteCategory.SPORTS to setOf(
             "espn.com", "espncricinfo.com", "cricbuzz.com", "bleacherreport.com",

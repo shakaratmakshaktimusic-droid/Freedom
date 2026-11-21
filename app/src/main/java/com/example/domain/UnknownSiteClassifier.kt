@@ -73,6 +73,27 @@ object UnknownSiteClassifier {
         "track your order", "restaurants near you"
     )
 
+    // Unmoderated pirate movie/TV streaming sites & stream-aggregator directories
+    // (catches constantly rotating mirrors like atlantic.bz, cinezo.*, movy.*, fmhy.*)
+    private val TV_VIDEO_STRONG_HOST_TOKENS = listOf(
+        "fmhy", "atlantic.bz", "fprime", "shuttletv", "flystream", "cinezo", "movy",
+        "123movies", "fmovies", "flixhq", "sflix", "braflix", "hdtoday", "soap2day",
+        "hurawatch", "lookmovie", "moviesjoy", "myflixer", "vidsrc", "bflix", "cineb",
+        "solarmovie", "putlocker", "watchseries", "gomovies", "himovies", "netmirror",
+        "vegamovies", "hdhub4u", "bollyflix", "filmyzilla", "katmoviehd", "moviesmod",
+        "hianime", "aniwatch", "gogoanime", "dramacool", "kisskh", "freemovies", "watchmovies"
+    )
+    private val TV_VIDEO_URL_PATH_SIGNALS = listOf(
+        "/title/movie/", "/title/tv/", "/watch/movie/", "/watch/tv/", "/watch-movie/",
+        "/watch-tv/", "/movie/", "/movies/", "/stream/", "/episode/", "/series/"
+    )
+    private val TV_VIDEO_PAGE_SIGNALS = listOf(
+        "stream aggregators", "4k / dual audio", "dual audio", "external subs",
+        "ad-toggle", "custom player exclusively", "watch free movies", "free movie streaming",
+        "stream movies", "watch full movie", "hd movie", "tmdb", "imdb",
+        "join our discord", "server 1", "server 2", "subtitles", "season 1", "episode 1"
+    )
+
     private const val SCORE_THRESHOLD = 6
 
     fun classify(
@@ -145,6 +166,12 @@ object UnknownSiteClassifier {
                 scorePageOnly(boundedPageText, FOOD_DELIVERY_PAGE_SIGNALS)
             )
         }
+        if (WebsiteCategory.TV_VIDEO in activeCategories) {
+            evaluate(
+                WebsiteCategory.TV_VIDEO,
+                scoreTvVideoSignals(lowerHost, lowerUrl, boundedPageText)
+            )
+        }
 
         val winner = bestCategory ?: return null
         return ClassificationResult(
@@ -192,6 +219,50 @@ object UnknownSiteClassifier {
             }
         }
         return 0
+    }
+
+    /**
+     * Scores unmoderated free movie/TV streaming sites and stream-aggregator directories
+     * (e.g. fmhy.net/video, atlantic.bz/title/movie/..., rotating .bz/.to/.cc mirrors).
+     */
+    fun scoreUnmoderatedStreamingSite(
+        host: String,
+        fullUrl: String,
+        visibleTextSnippets: List<String>
+    ): Int {
+        val normalizedHost = DomainBlockMatcher.normalizeDomain(host) ?: return 0
+        if (isSafeDomain(normalizedHost)) return 0
+        val boundedPageText = visibleTextSnippets
+            .take(48)
+            .joinToString(" ") { it.take(180) }
+            .lowercase()
+        return scoreTvVideoSignals(normalizedHost.lowercase(), fullUrl.lowercase(), boundedPageText)
+    }
+
+    private fun scoreTvVideoSignals(
+        lowerHost: String,
+        lowerUrl: String,
+        boundedPageText: String
+    ): Int {
+        var score = 0
+        for (token in TV_VIDEO_STRONG_HOST_TOKENS) {
+            if (lowerHost.contains(token)) {
+                score += 6
+                break
+            }
+        }
+        if (TV_VIDEO_URL_PATH_SIGNALS.any { lowerUrl.contains(it) }) {
+            score += 3
+        }
+        var pageHits = 0
+        for (signal in TV_VIDEO_PAGE_SIGNALS) {
+            if (boundedPageText.contains(signal)) {
+                pageHits++
+                score += 2
+                if (pageHits >= 4) break
+            }
+        }
+        return score
     }
 
     fun isSafeDomain(normalizedHost: String): Boolean {
