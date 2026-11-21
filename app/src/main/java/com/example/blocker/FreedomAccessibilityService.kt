@@ -96,6 +96,25 @@ class FreedomAccessibilityService : AccessibilityService() {
     @Volatile
     private var lastUnverifiedYouTubeTimeMs: Long = 0L
 
+    // 1.5s Watch-Collapse Back Lockout: once a single Back collapses Watch -> Miniplayer,
+    // NEVER fire a second GLOBAL_ACTION_BACK while miniplayer close passes run (prevents
+    // accidental exit to Android Home / Vivo floating-window bounce!).
+    @Volatile
+    private var lastWatchCollapseCutPkg: String = ""
+
+    @Volatile
+    private var lastWatchCollapseCutTimeMs: Long = 0L
+
+    // Bounded single-hop recheck tracking for browser / third-party app evictions
+    @Volatile
+    private var lastEvictionRecheckPkg: String = ""
+
+    @Volatile
+    private var lastEvictionRecheckCount: Int = 0
+
+    @Volatile
+    private var lastEvictionTimeMs: Long = 0L
+
     private val inFlightVideoLookups = ConcurrentHashMap.newKeySet<String>()
 
     @Volatile
@@ -874,6 +893,11 @@ class FreedomAccessibilityService : AccessibilityService() {
         return (SystemClock.elapsedRealtime() - lastApprovedYouTubeTimeMs) < 90_000L
     }
 
+    private fun isWithinWatchCollapseBackLockout(pkg: String): Boolean {
+        if (pkg != lastWatchCollapseCutPkg) return false
+        return (SystemClock.elapsedRealtime() - lastWatchCollapseCutTimeMs) < 1_500L
+    }
+
     private fun evaluateAlwaysOnContentProtection(
         allWindows: List<AccessibilityWindowInfo>,
         triggerPackage: String?,
@@ -1042,33 +1066,31 @@ class FreedomAccessibilityService : AccessibilityService() {
                 }
 
                 // Silent Always-On Adult / Mature-Media Protection inside YouTube & Morphe YT
-                // (Skipped for channels the user explicitly verified & approved in Study Mode)
-                val adultActive = InAppAdultFilterEngine.evaluateActiveContent(
-                    urlOrQuery = ytSnapshot.activeVideoTitle,
+                // (Only cuts ACTIVE playback or an ACTIVE explicit Search Results bar — NEVER fires Back
+                // on Home, Subscriptions, Profile, Library, or Watch History thumbnails!)
+                val adultCutAction = YouTubeStudyEngine.evaluateInAppAdultCutAction(
+                    screenMode = ytSnapshot.screenMode,
+                    activeVideoTitle = ytSnapshot.activeVideoTitle,
+                    activeSearchQuery = ytSnapshot.activeSearchQuery,
+                    isSearchResultsScreen = ytSnapshot.isSearchResultsScreen,
                     visibleSnippets = ytSnapshot.allVisibleSnippets,
                     isApprovedYouTubeChannel = isApprovedYouTubeChannel
                 )
-                if (adultActive.isFlagged) {
-                    val cutAction = when (ytSnapshot.screenMode) {
-                        YouTubeStudyEngine.ScreenMode.SHORTS_PLAYER ->
-                            YouTubeStudyEngine.PlaybackCutAction.EXIT_SHORTS_TO_HOME
-                        YouTubeStudyEngine.ScreenMode.MINI_PLAYER ->
-                            YouTubeStudyEngine.PlaybackCutAction.CLOSE_MINIPLAYER_ONLY
-                        YouTubeStudyEngine.ScreenMode.WATCH_PLAYER,
-                        YouTubeStudyEngine.ScreenMode.LIVE_PLAYER ->
-                            YouTubeStudyEngine.PlaybackCutAction.CLOSE_WATCH_AND_MINIPLAYER
-                        else ->
-                            YouTubeStudyEngine.PlaybackCutAction.EXIT_SHORTS_TO_HOME
-                    }
+                if (adultCutAction != null) {
                     enforceYouTubeInAppVideoCut(
                         blockedPackage = pkg,
                         root = root,
-                        cutAction = cutAction,
-                        reason = "Inappropriate or mature content filtered in ${ytClient.displayName}",
+                        cutAction = adultCutAction,
+                        reason = if (adultCutAction == YouTubeStudyEngine.PlaybackCutAction.EXIT_SEARCH_RESULTS) {
+                            "Explicit search filtered in ${ytClient.displayName}"
+                        } else {
+                            "Inappropriate or mature content filtered in ${ytClient.displayName}"
+                        },
                         notificationText = "Inappropriate content filtered by Freedom.",
                         sessionId = sessionId,
                         screenWidth = screenWidth,
-                        screenHeight = screenHeight
+                        screenHeight = screenHeight,
+                        miniPlayerBounds = ytSnapshot.miniPlayerBounds
                     )
                     return
                 }
@@ -1262,6 +1284,12 @@ class FreedomAccessibilityService : AccessibilityService() {
 
                 // B4. Deep Browser/WebView DOM Inspection (Works across Chrome, Brave, Edge, Firefox,
                 //     Samsung Internet, Opera, Vivo Browser, Reddit In-App WebView, etc.)
+                //     Anti-bounce guard: when a known browser is on an empty New Tab, History,
+                //     Bookmarks, or Downloads screen (no active host & no active search query),
+                //     skip DOM eviction so old history/bookmark items never bounce-exit the browser!
+                if (isKnownBrowserOrGoogle && extractedHost.isNullOrBlank() && activeSearchQuery.isNullOrBlank()) {
+                    continue
+                }
                 val pageSnippets = BrowserUrlExtractor.collectBoundedPageSnippets(root, maxSnippets = 48)
 
                 // Mobile-web YouTube Study Mode check when browsing m.youtube.com/youtube.com in a browser
@@ -1372,7 +1400,8 @@ class FreedomAccessibilityService : AccessibilityService() {
                         navigateHome = false,
                         reason = "Piracy or streaming aggregator hub filtered in-app",
                         notificationText = "Unmoderated streaming hub blocked by Freedom.",
-                        sessionId = sessionId
+                        sessionId = sessionId,
+                        isNativeThirdPartyApp = true
                     )
                     return
                 }
@@ -1386,7 +1415,8 @@ class FreedomAccessibilityService : AccessibilityService() {
                         navigateHome = false,
                         reason = res.reason.ifBlank { "Inappropriate in-app content filtered" },
                         notificationText = "Inappropriate content filtered by Freedom.",
-                        sessionId = sessionId
+                        sessionId = sessionId,
+                        isNativeThirdPartyApp = true
                     )
                     return
                 }
@@ -1413,12 +1443,19 @@ class FreedomAccessibilityService : AccessibilityService() {
         miniPlayerBounds: Rect? = null
     ) {
         val key = "ytcut:$blockedPackage:${cutAction.name}:$reason"
-        if (shouldThrottle(key, 500L)) return
+        val throttleMs = if (cutAction == YouTubeStudyEngine.PlaybackCutAction.EXIT_SEARCH_RESULTS) 1_200L else 550L
+        if (shouldThrottle(key, throttleMs)) return
 
         when (cutAction) {
             YouTubeStudyEngine.PlaybackCutAction.CLOSE_WATCH_AND_MINIPLAYER -> {
                 YouTubeAccessibilityInspector.tryPauseActiveVideo(root)
-                performGlobalAction(GLOBAL_ACTION_BACK)
+                // Anti-bounce lockout: if Watch was JUST collapsed (<1.5s ago), NEVER press Back
+                // a second time (that would exit Morphe YT to Android Home!). Just close miniplayer.
+                if (!isWithinWatchCollapseBackLockout(blockedPackage)) {
+                    lastWatchCollapseCutPkg = blockedPackage
+                    lastWatchCollapseCutTimeMs = SystemClock.elapsedRealtime()
+                    performGlobalAction(GLOBAL_ACTION_BACK)
+                }
                 scheduleMiniPlayerClosePasses(blockedPackage, screenWidth, screenHeight, miniPlayerBounds)
             }
 
@@ -1426,20 +1463,36 @@ class FreedomAccessibilityService : AccessibilityService() {
                 val closed = YouTubeAccessibilityInspector.tryCloseMiniPlayer(root, screenWidth, screenHeight)
                 if (!closed) {
                     YouTubeAccessibilityInspector.tryPauseActiveVideo(root)
-                    if (miniPlayerBounds != null && miniPlayerBounds.width() > 0) {
+                    val liveBounds = miniPlayerBounds
+                        ?: YouTubeAccessibilityInspector.findLiveMiniPlayerBounds(root, screenWidth, screenHeight)
+                    if (liveBounds != null && liveBounds.width() > 0) {
                         // Tap rightmost Close (×) corner of the miniplayer bar directly
-                        val tapX = (miniPlayerBounds.right - (28f * resources.displayMetrics.density))
-                            .coerceIn(miniPlayerBounds.left + 8f, screenWidth - 8f)
-                        val tapY = miniPlayerBounds.exactCenterY().coerceIn(8f, screenHeight - 8f)
+                        val tapX = (liveBounds.right - (26f * resources.displayMetrics.density))
+                            .coerceIn(liveBounds.left + 8f, screenWidth - 8f)
+                        val tapY = liveBounds.exactCenterY().coerceIn(8f, screenHeight - 8f)
                         dispatchTapGesture(tapX, tapY)
                     }
-                    scheduleMiniPlayerClosePasses(blockedPackage, screenWidth, screenHeight, miniPlayerBounds)
+                    scheduleMiniPlayerClosePasses(blockedPackage, screenWidth, screenHeight, liveBounds)
                 }
             }
 
             YouTubeStudyEngine.PlaybackCutAction.EXIT_SHORTS_TO_HOME -> {
-                val navigatedHomeTab = YouTubeAccessibilityInspector.tryNavigateShortsToHome(root, screenHeight)
-                if (!navigatedHomeTab) {
+                val switchedTab = YouTubeAccessibilityInspector.tryNavigateShortsToHome(
+                    root = root,
+                    screenHeight = screenHeight,
+                    screenWidth = screenWidth
+                )
+                if (!switchedTab && !isWithinWatchCollapseBackLockout(blockedPackage)) {
+                    lastWatchCollapseCutPkg = blockedPackage
+                    lastWatchCollapseCutTimeMs = SystemClock.elapsedRealtime()
+                    performGlobalAction(GLOBAL_ACTION_BACK)
+                }
+            }
+
+            YouTubeStudyEngine.PlaybackCutAction.EXIT_SEARCH_RESULTS -> {
+                if (!isWithinWatchCollapseBackLockout(blockedPackage)) {
+                    lastWatchCollapseCutPkg = blockedPackage
+                    lastWatchCollapseCutTimeMs = SystemClock.elapsedRealtime()
                     performGlobalAction(GLOBAL_ACTION_BACK)
                 }
             }
@@ -1531,8 +1584,10 @@ class FreedomAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * Rapidly clicks YouTube's bottom miniplayer Close ("×") button right after collapsing
-     * an unapproved Watch player so video & audio stop completely inside YouTube.
+     * Rapidly clicks YouTube / Morphe YT's bottom miniplayer Close ("×") button right after
+     * collapsing a blocked Watch player so video & audio stop completely INSIDE the app.
+     * Re-scans the LIVE Accessibility tree on every pass to locate the freshly rendered
+     * miniplayer bar coordinates (never relies solely on stale Watch-screen bounds!).
      */
     private fun scheduleMiniPlayerClosePasses(
         ytPackage: String,
@@ -1540,19 +1595,51 @@ class FreedomAccessibilityService : AccessibilityService() {
         screenHeight: Int,
         fallbackMiniBounds: Rect? = null
     ) {
-        val delays = longArrayOf(140L, 340L, 620L, 980L)
+        val delays = longArrayOf(150L, 350L, 620L, 960L)
+        var miniPlayerConfirmedClosed = false
         for ((idx, delayMs) in delays.withIndex()) {
             mainHandler.postDelayed({
+                if (miniPlayerConfirmedClosed) return@postDelayed
                 val activeRoot = runCatching { rootInActiveWindow }.getOrNull() ?: return@postDelayed
                 if (activeRoot.packageName?.toString() != ytPackage) return@postDelayed
+
                 val closed = YouTubeAccessibilityInspector.tryCloseMiniPlayer(activeRoot, screenWidth, screenHeight)
-                if (!closed) {
-                    YouTubeAccessibilityInspector.tryPauseActiveVideo(activeRoot)
-                    if (idx == 2 && fallbackMiniBounds != null && fallbackMiniBounds.width() > 0) {
-                        val tapX = (fallbackMiniBounds.right - (28f * resources.displayMetrics.density))
-                            .coerceIn(fallbackMiniBounds.left + 8f, screenWidth - 8f)
-                        val tapY = fallbackMiniBounds.exactCenterY().coerceIn(8f, screenHeight - 8f)
-                        dispatchTapGesture(tapX, tapY)
+                if (closed) {
+                    miniPlayerConfirmedClosed = true
+                    return@postDelayed
+                }
+
+                // Dynamically re-locate the freshly rendered miniplayer bar on screen
+                val liveBounds = YouTubeAccessibilityInspector.findLiveMiniPlayerBounds(
+                    root = activeRoot,
+                    screenWidth = screenWidth,
+                    screenHeight = screenHeight
+                ) ?: if (idx == 0) fallbackMiniBounds else null
+
+                if (liveBounds == null) {
+                    // After the initial 150ms settle window, absence of any live miniplayer means it's closed!
+                    if (idx >= 1) miniPlayerConfirmedClosed = true
+                    return@postDelayed
+                }
+
+                YouTubeAccessibilityInspector.tryPauseActiveVideo(activeRoot)
+
+                if (liveBounds.width() > 0 && (idx == 1 || idx == 2)) {
+                    val density = resources.displayMetrics.density
+                    val rightInsetDp = if (idx == 1) 26f else 36f
+                    val tapX = (liveBounds.right - (rightInsetDp * density))
+                        .coerceIn(liveBounds.left + 8f, screenWidth - 8f)
+                    val tapY = liveBounds.exactCenterY().coerceIn(8f, screenHeight - 8f)
+                    dispatchTapGesture(tapX, tapY)
+                } else if (idx == 3) {
+                    // Final safety pass: ensure audio is silenced if OEM blocked gesture
+                    val am = getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+                    if (am != null) {
+                        runCatching {
+                            val now = SystemClock.uptimeMillis()
+                            am.dispatchMediaKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_MEDIA_PAUSE, 0))
+                            am.dispatchMediaKeyEvent(KeyEvent(now, now + 20, KeyEvent.ACTION_UP, KeyEvent.KEYCODE_MEDIA_PAUSE, 0))
+                        }
                     }
                 }
             }, delayMs)
@@ -1674,24 +1761,39 @@ class FreedomAccessibilityService : AccessibilityService() {
     /**
      * Clean eviction for SafeSearch tampering, browser YouTube links, and In-App Adult Protection.
      * Never logs URLs, search queries, or explicit titles, and never attaches a floating mask overlay.
+     * Uses bounded single-hop rechecks so browsers and third-party apps never bounce-exit to Home.
      */
     private fun enforceContentProtectionEviction(
         blockedPackage: String,
         navigateHome: Boolean,
         reason: String,
         notificationText: String,
-        sessionId: Long
+        sessionId: Long,
+        isNativeThirdPartyApp: Boolean = false
     ) {
         val key = "cp:$blockedPackage:$reason"
-        if (shouldThrottle(key, 750L)) return
+        val throttleMs = if (isNativeThirdPartyApp) 1_200L else 850L
+        if (shouldThrottle(key, throttleMs)) return
 
         if (navigateHome) {
             performGlobalAction(GLOBAL_ACTION_HOME)
             scheduleBackgroundProcessKill(blockedPackage)
         } else {
+            val now = SystemClock.elapsedRealtime()
+            if (blockedPackage == lastEvictionRecheckPkg && (now - lastEvictionTimeMs) < 2_200L) {
+                lastEvictionRecheckCount++
+            } else {
+                lastEvictionRecheckPkg = blockedPackage
+                lastEvictionRecheckCount = 1
+            }
+            lastEvictionTimeMs = now
+
             performGlobalAction(GLOBAL_ACTION_BACK)
-            // Follow-up check in case the blocked page used an in-page redirect hop
-            mainHandler.postDelayed({ recheckActiveWindowsNow() }, 420L)
+            // Bounded single-hop recheck in case a blocked web page used an in-page redirect hop;
+            // never chain infinite follow-up Back presses that could kick the user out of the app.
+            if (!isNativeThirdPartyApp && lastEvictionRecheckCount <= 1) {
+                mainHandler.postDelayed({ recheckActiveWindowsNow() }, 480L)
+            }
         }
 
         FreedomBlockNotifier.showBlockedAlert(

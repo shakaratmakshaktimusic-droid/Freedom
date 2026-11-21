@@ -39,6 +39,8 @@ object YouTubeStudyEngine {
         CLOSE_MINIPLAYER_ONLY,
         /** Exit Shorts directly to YouTube's Home tab / Back without exiting the YouTube app into PiP. */
         EXIT_SHORTS_TO_HOME,
+        /** Exit an explicit YouTube Search Results screen cleanly with a single Back press. */
+        EXIT_SEARCH_RESULTS,
         /** Close an active Picture-in-Picture floating window directly. */
         CLOSE_PIP_WINDOW,
         /** Evict an unverifiable third-party client app to Home (Strict Mode only). */
@@ -363,6 +365,68 @@ object YouTubeStudyEngine {
         }
 
         return StudyDecision.Allow
+    }
+
+    /**
+     * Pure decision helper for silent always-on Adult / Mature-Media protection inside YouTube,
+     * Morphe YT, and YouTube ReVanced:
+     *  - On active players (WATCH_PLAYER, LIVE_PLAYER, SHORTS_PLAYER, MINI_PLAYER): evaluates
+     *    the active video title + visible snippets and returns an IN-APP cut action (never exits app).
+     *  - On an active Search Results screen (`isSearchResultsScreen && !activeSearchQuery.isNullOrBlank()`):
+     *    evaluates ONLY the active search query and returns `EXIT_SEARCH_RESULTS` (single Back).
+     *  - On Home / Subscriptions / Profile / Watch History (`FEED_OR_SEARCH` without active explicit search):
+     *    returns `null` so old thumbnails in Watch History NEVER fire Back or exit Morphe YT.
+     */
+    fun evaluateInAppAdultCutAction(
+        screenMode: ScreenMode,
+        activeVideoTitle: String?,
+        activeSearchQuery: String?,
+        isSearchResultsScreen: Boolean,
+        visibleSnippets: List<String>,
+        isApprovedYouTubeChannel: Boolean
+    ): PlaybackCutAction? {
+        if (isApprovedYouTubeChannel) return null
+
+        return when (screenMode) {
+            ScreenMode.WATCH_PLAYER,
+            ScreenMode.LIVE_PLAYER -> {
+                val res = InAppAdultFilterEngine.evaluateActiveContent(
+                    urlOrQuery = activeVideoTitle,
+                    visibleSnippets = visibleSnippets,
+                    isApprovedYouTubeChannel = false
+                )
+                if (res.isFlagged) PlaybackCutAction.CLOSE_WATCH_AND_MINIPLAYER else null
+            }
+
+            ScreenMode.MINI_PLAYER -> {
+                val res = InAppAdultFilterEngine.evaluateActiveContent(
+                    urlOrQuery = activeVideoTitle,
+                    visibleSnippets = visibleSnippets,
+                    isApprovedYouTubeChannel = false
+                )
+                if (res.isFlagged) PlaybackCutAction.CLOSE_MINIPLAYER_ONLY else null
+            }
+
+            ScreenMode.SHORTS_PLAYER -> {
+                val res = InAppAdultFilterEngine.evaluateActiveContent(
+                    urlOrQuery = activeVideoTitle,
+                    visibleSnippets = visibleSnippets,
+                    isApprovedYouTubeChannel = false
+                )
+                if (res.isFlagged) PlaybackCutAction.EXIT_SHORTS_TO_HOME else null
+            }
+
+            ScreenMode.FEED_OR_SEARCH,
+            ScreenMode.CHANNEL_PAGE -> {
+                if (isSearchResultsScreen && !activeSearchQuery.isNullOrBlank()) {
+                    val queryRes = InAppAdultFilterEngine.evaluateQueryOrUrl(activeSearchQuery)
+                    if (queryRes.isFlagged) PlaybackCutAction.EXIT_SEARCH_RESULTS else null
+                } else {
+                    // NEVER fire Back on Home, Subscriptions, Profile, or Watch History thumbnails!
+                    null
+                }
+            }
+        }
     }
 
     /**

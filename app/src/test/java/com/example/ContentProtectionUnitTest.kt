@@ -641,6 +641,77 @@ class ContentProtectionUnitTest {
     }
 
     @Test
+    fun morpheYouTube_watchHistoryNeverBounceExits_whileActivePlaybackAndExplicitSearchCutCleanly() {
+        val watchHistorySnippets = listOf(
+            "History",
+            "Sex Education",
+            "After We Collided // Shower Scene",
+            "XXX-Rated Scenes",
+            "Subscriptions",
+            "You"
+        )
+
+        // 1. Watch History / Custom Default Morphe Tab with old explicit thumbnails -> MUST return null (ZERO Back / ZERO exit!)
+        val historyAction = YouTubeStudyEngine.evaluateInAppAdultCutAction(
+            screenMode = YouTubeStudyEngine.ScreenMode.FEED_OR_SEARCH,
+            activeVideoTitle = null,
+            activeSearchQuery = null,
+            isSearchResultsScreen = false,
+            visibleSnippets = watchHistorySnippets,
+            isApprovedYouTubeChannel = false
+        )
+        assertEquals(
+            "Watch History or custom default Morphe tab must NEVER fire Back or exit the app",
+            null,
+            historyAction
+        )
+
+        // 2. Tapping that exact flagged video opens WATCH_PLAYER -> CLOSE_WATCH_AND_MINIPLAYER
+        val watchAction = YouTubeStudyEngine.evaluateInAppAdultCutAction(
+            screenMode = YouTubeStudyEngine.ScreenMode.WATCH_PLAYER,
+            activeVideoTitle = "After We Collided // Shower Scene",
+            activeSearchQuery = null,
+            isSearchResultsScreen = false,
+            visibleSnippets = listOf("After We Collided // Shower Scene", "Comments", "Share"),
+            isApprovedYouTubeChannel = false
+        )
+        assertEquals(YouTubeStudyEngine.PlaybackCutAction.CLOSE_WATCH_AND_MINIPLAYER, watchAction)
+
+        // 3. Video lingering in bottom MINI_PLAYER -> CLOSE_MINIPLAYER_ONLY (never fires Back!)
+        val miniAction = YouTubeStudyEngine.evaluateInAppAdultCutAction(
+            screenMode = YouTubeStudyEngine.ScreenMode.MINI_PLAYER,
+            activeVideoTitle = "Sex Education hot scenes",
+            activeSearchQuery = null,
+            isSearchResultsScreen = false,
+            visibleSnippets = watchHistorySnippets,
+            isApprovedYouTubeChannel = false
+        )
+        assertEquals(YouTubeStudyEngine.PlaybackCutAction.CLOSE_MINIPLAYER_ONLY, miniAction)
+
+        // 4. Active explicit YouTube Search Results screen -> EXIT_SEARCH_RESULTS (single Back)
+        val explicitSearchAction = YouTubeStudyEngine.evaluateInAppAdultCutAction(
+            screenMode = YouTubeStudyEngine.ScreenMode.FEED_OR_SEARCH,
+            activeVideoTitle = null,
+            activeSearchQuery = "shameless web series",
+            isSearchResultsScreen = true,
+            visibleSnippets = listOf("shameless web series"),
+            isApprovedYouTubeChannel = false
+        )
+        assertEquals(YouTubeStudyEngine.PlaybackCutAction.EXIT_SEARCH_RESULTS, explicitSearchAction)
+
+        // 5. Safe YouTube Search Results -> null (no interruption)
+        val safeSearchAction = YouTubeStudyEngine.evaluateInAppAdultCutAction(
+            screenMode = YouTubeStudyEngine.ScreenMode.FEED_OR_SEARCH,
+            activeVideoTitle = null,
+            activeSearchQuery = "linear algebra lecture",
+            isSearchResultsScreen = true,
+            visibleSnippets = listOf("linear algebra lecture", "3Blue1Brown"),
+            isApprovedYouTubeChannel = false
+        )
+        assertEquals(null, safeSearchAction)
+    }
+
+    @Test
     fun strictModePolicy_locksContentProtectionChanges() {
         assertTrue(
             StrictModePolicy.canDisableContentProtection("YouTube Study Mode", true) is StrictModePolicy.GuardResult.Denied

@@ -33,4 +33,10 @@ All notable changes to **Freedom** are documented in this file.
   - Unapproved YouTube/Morphe YT/ReVanced videos are now cut *inside* YouTube (Pause → Back → multi-pass bottom miniplayer `×` close + right-edge tap fallback; Shorts → Home tab) instead of exiting YouTube into Android PiP.
   - Tightened YouTube event throttling to 120ms with 3 independent bottom-miniplayer detectors to stop fast click + swipe-down bypasses.
   - Added background media stop (`KEYCODE_MEDIA_PAUSE` / `KEYCODE_MEDIA_STOP` + transient audio focus + background process kill) when leaving YouTube for Home before an unapproved video finishes loading.
+- **Morphe YT / YouTube Bounce-Loop, Miniplayer & Custom Default-Tab Fix**:
+  - Fixed a root misclassification where the bottom miniplayer's `"Pause video"` button triggered `WATCH_PLAYER` fallback detection on Home/History screens and fired `GLOBAL_ACTION_BACK`, kicking Morphe YT to Android Home and triggering Vivo's shrinking/mini-window bounce loop.
+  - Strictly gated YouTube/Morphe/ReVanced adult filtering so Watch History, Profile, Subscriptions, and any custom Morphe default screen **never** fire `Back` on old thumbnails; only active playback (`Watch`, `Live`, `Shorts`, `Miniplayer`) and active explicit Search Results are cut.
+  - Added a 1.5s Watch-Collapse `Back` lockout and live Accessibility tree re-inspection (`findLiveMiniPlayerBounds` + Play/Pause right-sibling `×` matching + expanded `99%` bottom edge tolerance) so collapsed videos close cleanly inside the bottom miniplayer without ever exiting the app.
+  - Removed any hard dependency on a "Home" tab when exiting Shorts — switches cleanly to whatever non-Shorts default/custom bottom-dock tab the user configured in Morphe YT / ReVanced.
+  - Applied cross-feature anti-bounce guards across browsers (skipping DOM eviction on empty New Tab/History/Bookmarks screens) and native third-party apps (bounded single-hop recheck and settle cooldown).
 - **Public YouTube Channel Search Encoding**: Fixed double-encoded channel search filter parameter (`sp=EgIQAg%3D%3D`) and added desktop User-Agent + `displayName`/`runs` JSON fallback parsing.

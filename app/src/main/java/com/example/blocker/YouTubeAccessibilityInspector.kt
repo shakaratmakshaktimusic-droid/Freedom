@@ -28,6 +28,8 @@ object YouTubeAccessibilityInspector {
         val miniPlayerVisible: Boolean = false,
         val miniPlayerSubtitle: String? = null,
         val miniPlayerBounds: Rect? = null,
+        val isSearchResultsScreen: Boolean = false,
+        val activeSearchQuery: String? = null,
         val allVisibleSnippets: List<String> = emptyList()
     )
 
@@ -54,6 +56,15 @@ object YouTubeAccessibilityInspector {
     private val VIDEO_TITLE_ID_TOKENS = listOf(
         "video_title", "title_text", "detail_video_title_view", "player_video_title"
     )
+    private val SEARCH_BAR_ID_TOKENS = listOf(
+        "search_edit_text", "search_query", "search_bar_text", "search_box", "toolbar_search"
+    )
+    private val NON_SEARCH_TOP_LABELS = setOf(
+        "youtube", "search youtube", "search", "search history", "history", "watch history",
+        "subscriptions", "library", "home", "shorts", "you", "profile", "notifications",
+        "all", "new to you", "videos", "live", "podcasts", "music", "playlists", "watch later",
+        "downloads", "settings", "cast", "morphe", "revanced"
+    )
 
     fun inspect(
         root: AccessibilityNodeInfo?,
@@ -74,6 +85,9 @@ object YouTubeAccessibilityInspector {
         var activeVideoTitle: String? = null
         var miniPlayerSubtitle: String? = null
         var miniPlayerBounds: Rect? = null
+        var activeSearchQuery: String? = null
+        var hasTopSearchActionIndicator = false
+        var topToolbarQueryCandidate: String? = null
         val snippets = ArrayList<String>(40)
 
         val queue = ArrayDeque<Pair<AccessibilityNodeInfo, Int>>()
@@ -83,7 +97,8 @@ object YouTubeAccessibilityInspector {
 
         val watchHeaderMaxY = (screenHeight * 0.68f).toInt()
         val miniPlayerMinY = (screenHeight * 0.58f).toInt()
-        val bottomNavStartY = (screenHeight * 0.90f).toInt()
+        val miniPlayerMaxY = (screenHeight * 0.99f).toInt()
+        val searchTopBarMaxY = (screenHeight * 0.16f).toInt()
 
         while (queue.isNotEmpty() && visited < 160) {
             val (node, depth) = queue.removeFirst()
@@ -93,10 +108,42 @@ object YouTubeAccessibilityInspector {
             val text = node.text?.toString()?.trim().orEmpty()
             val desc = node.contentDescription?.toString()?.trim().orEmpty()
             val lowerDesc = desc.lowercase()
+            val lowerText = text.lowercase()
 
             if (snippets.size < 40) {
                 if (text.length in 2..150) snippets.add(text)
                 else if (desc.length in 2..150) snippets.add(desc)
+            }
+
+            // 0. Detect active YouTube Search Results bar (strictly distinct from Watch History / Profile!)
+            if (activeSearchQuery == null && SEARCH_BAR_ID_TOKENS.any { resId.contains(it) }) {
+                node.getBoundsInScreen(bounds)
+                if (bounds.top < searchTopBarMaxY &&
+                    text.length in 2..140 &&
+                    lowerText !in NON_SEARCH_TOP_LABELS
+                ) {
+                    activeSearchQuery = text
+                }
+            }
+            if (!hasTopSearchActionIndicator && (
+                    lowerDesc == "clear" ||
+                        lowerDesc == "clear search" ||
+                        lowerDesc == "clear query" ||
+                        lowerDesc.contains("search filter") ||
+                        resId.contains("search_clear") ||
+                        resId.contains("search_edit_text")
+                    )
+            ) {
+                node.getBoundsInScreen(bounds)
+                if (bounds.top < searchTopBarMaxY) {
+                    hasTopSearchActionIndicator = true
+                }
+            }
+            if (topToolbarQueryCandidate == null && text.length in 2..140 && lowerText !in NON_SEARCH_TOP_LABELS) {
+                node.getBoundsInScreen(bounds)
+                if (bounds.top in 0 until searchTopBarMaxY && bounds.height() in 16..(screenHeight * 0.10f).toInt()) {
+                    topToolbarQueryCandidate = text
+                }
             }
 
             // 1. Detect Shorts player container
@@ -118,9 +165,13 @@ object YouTubeAccessibilityInspector {
 
             if (looksLikeMiniPlayerNode) {
                 node.getBoundsInScreen(bounds)
-                if (bounds.height() in 16..(screenHeight * 0.28f).toInt() && bounds.top >= miniPlayerMinY) {
+                if (bounds.height() in 16..(screenHeight * 0.28f).toInt() &&
+                    bounds.top >= miniPlayerMinY &&
+                    bounds.bottom <= miniPlayerMaxY
+                ) {
                     hasMiniPlayer = true
-                    if (miniPlayerBounds == null || bounds.width() > (miniPlayerBounds?.width() ?: 0)) {
+                    val existingMini = miniPlayerBounds
+                    if (existingMini == null || bounds.width() > existingMini.width()) {
                         miniPlayerBounds = Rect(bounds)
                     }
                     if (miniPlayerSubtitle == null) {
@@ -129,17 +180,19 @@ object YouTubeAccessibilityInspector {
                 }
             }
 
-            // Signal 2b: Any "Pause video" / "Play video" / "Pause" / "Play" / "Close" control sitting
-            // inside the bottom miniplayer band (above the bottom nav bar) when not fullscreen Watch!
-            if (!hasMiniPlayer && (
-                    lowerDesc == "pause video" || lowerDesc == "play video" ||
-                        lowerDesc == "pause" || lowerDesc == "play" ||
-                        lowerDesc == "replay video" ||
-                        resId.contains("miniplayer_play") || resId.contains("floaty")
-                    )
-            ) {
+            // Signal 2b: Any "Pause video" / "Play video" / "Pause" / "Play" / "Replay video" control
+            // sitting inside the bottom miniplayer band (right half) when not fullscreen Watch!
+            val isSpecificPlayPause = lowerDesc == "pause video" || lowerDesc == "play video" ||
+                lowerDesc == "replay video" ||
+                resId.contains("miniplayer_play") || resId.contains("floaty")
+            val isGenericPlayPause = lowerDesc == "pause" || lowerDesc == "play"
+
+            if (!hasMiniPlayer && (isSpecificPlayPause || isGenericPlayPause)) {
                 node.getBoundsInScreen(bounds)
-                if (bounds.top >= miniPlayerMinY && bounds.bottom <= bottomNavStartY + 80 &&
+                val rightHalfOrSpecific = isSpecificPlayPause || bounds.left >= (screenWidth * 0.45f).toInt()
+                if (rightHalfOrSpecific &&
+                    bounds.top >= miniPlayerMinY &&
+                    bounds.bottom <= miniPlayerMaxY &&
                     bounds.height() in 16..(screenHeight * 0.16f).toInt()
                 ) {
                     hasMiniPlayer = true
@@ -153,7 +206,10 @@ object YouTubeAccessibilityInspector {
                 node.getBoundsInScreen(bounds)
                 if (bounds.height() > (screenHeight * 0.18f).toInt()) {
                     hasWatchPlayer = true
-                } else if (bounds.height() in 24..(screenHeight * 0.18f).toInt() && bounds.top >= miniPlayerMinY) {
+                } else if (bounds.height() in 24..(screenHeight * 0.18f).toInt() &&
+                    bounds.top >= miniPlayerMinY &&
+                    bounds.bottom <= miniPlayerMaxY
+                ) {
                     hasMiniPlayer = true
                     if (miniPlayerBounds == null) {
                         miniPlayerBounds = Rect(bounds)
@@ -214,16 +270,26 @@ object YouTubeAccessibilityInspector {
             }
         }
 
-        // Secondary watch-page detection for YouTube / Morphe YT / ReVanced when video player uses SurfaceView
-        if (!hasWatchPlayer && !hasShortsContainer && client.family != YouTubeClientFamily.THIRD_PARTY) {
-            val hasWatchControls = snippets.any { s ->
-                s.equals("Subscribe", ignoreCase = true) ||
-                    s.equals("Subscribed", ignoreCase = true) ||
-                    s.startsWith("Comments", ignoreCase = true) ||
-                    s.contains("Pause video", ignoreCase = true) ||
-                    s.contains("Enter fullscreen", ignoreCase = true)
+        // Secondary watch-page detection for YouTube / Morphe YT / ReVanced when video player uses
+        // SurfaceView. CRITICAL: Never run this when `hasMiniPlayer` is already true, and never match
+        // "Pause video" alone (which also appears on the bottom miniplayer bar and would misclassify
+        // Home/History + miniplayer as WATCH_PLAYER, causing Back to exit Morphe YT!).
+        if (!hasWatchPlayer && !hasShortsContainer && !hasMiniPlayer && client.family != YouTubeClientFamily.THIRD_PARTY) {
+            val hasExclusiveWatchControl = snippets.any { s ->
+                s.startsWith("Comments", ignoreCase = true) ||
+                    s.contains("Enter fullscreen", ignoreCase = true) ||
+                    s.contains("Exit fullscreen", ignoreCase = true) ||
+                    s.equals("Minimize", ignoreCase = true)
             }
-            if (hasWatchControls) {
+            val hasSubscribeAndActionRow = snippets.any { s ->
+                s.equals("Subscribe", ignoreCase = true) || s.equals("Subscribed", ignoreCase = true)
+            } && snippets.any { s ->
+                s.equals("Share", ignoreCase = true) ||
+                    s.equals("Remix", ignoreCase = true) ||
+                    s.contains("like this video", ignoreCase = true) ||
+                    s.contains("Dislike this video", ignoreCase = true)
+            }
+            if (hasExclusiveWatchControl || hasSubscribeAndActionRow) {
                 hasWatchPlayer = true
             }
         }
@@ -250,6 +316,11 @@ object YouTubeAccessibilityInspector {
             }
         }
 
+        val resolvedSearchQuery = activeSearchQuery ?: if (hasTopSearchActionIndicator) topToolbarQueryCandidate else null
+        val isSearchResultsScreen = !hasWatchPlayer && !hasShortsContainer && !hasMiniPlayer &&
+            !resolvedSearchQuery.isNullOrBlank() &&
+            (activeSearchQuery != null || hasTopSearchActionIndicator)
+
         val resolvedChannelTitle = activeChannelTitle ?: if (!hasWatchPlayer && hasMiniPlayer) miniPlayerSubtitle else null
 
         val screenMode = when {
@@ -268,8 +339,83 @@ object YouTubeAccessibilityInspector {
             miniPlayerVisible = hasMiniPlayer,
             miniPlayerSubtitle = miniPlayerSubtitle,
             miniPlayerBounds = miniPlayerBounds,
+            isSearchResultsScreen = isSearchResultsScreen,
+            activeSearchQuery = resolvedSearchQuery,
             allVisibleSnippets = snippets
         )
+    }
+
+    /**
+     * Re-scans the LIVE Accessibility tree (e.g., 140ms–620ms after collapsing Watch into
+     * Morphe YT / YouTube's bottom miniplayer) to locate the freshly rendered miniplayer bar
+     * bounds so right-edge Close (×) taps always hit the real current coordinates.
+     */
+    fun findLiveMiniPlayerBounds(
+        root: AccessibilityNodeInfo?,
+        screenWidth: Int,
+        screenHeight: Int
+    ): Rect? {
+        if (root == null) return null
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(root)
+        var visited = 0
+        val bounds = Rect()
+        val miniBarTopMin = (screenHeight * 0.58f).toInt()
+        val miniBarBottomMax = (screenHeight * 0.99f).toInt()
+        var bestContainerBounds: Rect? = null
+        var playControlBandBounds: Rect? = null
+
+        while (queue.isNotEmpty() && visited < 150) {
+            val node = queue.removeFirst()
+            visited++
+            val resId = node.viewIdResourceName?.lowercase().orEmpty()
+            val desc = node.contentDescription?.toString()?.lowercase().orEmpty()
+
+            val isMiniContainer = MINIPLAYER_ID_TOKENS.any { resId.contains(it) } ||
+                desc.contains("expand miniplayer") ||
+                desc.contains("close miniplayer") ||
+                desc.contains("dismiss miniplayer") ||
+                desc == "close player" ||
+                desc == "close video"
+
+            if (isMiniContainer) {
+                node.getBoundsInScreen(bounds)
+                if (bounds.top >= miniBarTopMin &&
+                    bounds.bottom <= miniBarBottomMax &&
+                    bounds.height() in 20..(screenHeight * 0.28f).toInt()
+                ) {
+                    // If a small child matched (e.g. close button), use full width at its Y band
+                    val candidate = if (bounds.width() >= (screenWidth * 0.45f).toInt()) {
+                        Rect(bounds)
+                    } else {
+                        Rect(0, bounds.top, screenWidth, bounds.bottom)
+                    }
+                    val currentBest = bestContainerBounds
+                    if (currentBest == null || candidate.width() > currentBest.width()) {
+                        bestContainerBounds = candidate
+                    }
+                }
+            }
+
+            val isPlayPauseInMiniBand = desc == "pause video" || desc == "play video" ||
+                desc == "replay video" || resId.contains("miniplayer_play") ||
+                desc == "pause" || desc == "play"
+            if (playControlBandBounds == null && isPlayPauseInMiniBand) {
+                node.getBoundsInScreen(bounds)
+                if (bounds.top >= miniBarTopMin &&
+                    bounds.bottom <= miniBarBottomMax &&
+                    bounds.left >= (screenWidth * 0.45f).toInt() &&
+                    bounds.height() in 16..(screenHeight * 0.14f).toInt()
+                ) {
+                    playControlBandBounds = Rect(0, bounds.top, screenWidth, bounds.bottom)
+                }
+            }
+
+            for (i in 0 until node.childCount.coerceAtMost(10)) {
+                node.getChild(i)?.let { queue.add(it) }
+            }
+        }
+        return bestContainerBounds ?: playControlBandBounds
     }
 
     /**
@@ -298,7 +444,7 @@ object YouTubeAccessibilityInspector {
 
     /**
      * Finds and clicks YouTube's in-app bottom miniplayer Close ("×") button so playback
-     * stops completely inside YouTube without exiting the app into PiP.
+     * stops completely inside YouTube / Morphe YT without exiting the app into PiP.
      */
     fun tryCloseMiniPlayer(
         root: AccessibilityNodeInfo?,
@@ -310,11 +456,13 @@ object YouTubeAccessibilityInspector {
         queue.add(root)
         var visited = 0
         val bounds = Rect()
-        val miniBarTopMin = (screenHeight * 0.65f).toInt()
-        val miniBarBottomMax = (screenHeight * 0.96f).toInt()
+        val miniBarTopMin = (screenHeight * 0.58f).toInt()
+        val miniBarBottomMax = (screenHeight * 0.99f).toInt()
         var miniContainerNode: AccessibilityNodeInfo? = null
+        var miniPlayButtonNode: AccessibilityNodeInfo? = null
+        val miniPlayBounds = Rect()
 
-        while (queue.isNotEmpty() && visited < 140) {
+        while (queue.isNotEmpty() && visited < 160) {
             val node = queue.removeFirst()
             visited++
             val resId = node.viewIdResourceName?.lowercase().orEmpty()
@@ -333,10 +481,13 @@ object YouTubeAccessibilityInspector {
             }
 
             // Generic "Close" / "Dismiss" button positioned inside the lower miniplayer band (right half)
-            if (desc == "close" || desc == "dismiss" || text == "close" || resId.endsWith(":id/close_button")) {
+            if (desc == "close" || desc == "dismiss" || text == "close" ||
+                resId.endsWith(":id/close_button") || resId.contains("close")
+            ) {
                 node.getBoundsInScreen(bounds)
                 if (bounds.top >= miniBarTopMin && bounds.bottom <= miniBarBottomMax &&
-                    bounds.left >= (screenWidth * 0.65f).toInt()
+                    bounds.left >= (screenWidth * 0.65f).toInt() &&
+                    bounds.width() in 16..(screenWidth * 0.25f).toInt()
                 ) {
                     if (clickNodeOrParent(node)) return true
                 }
@@ -345,8 +496,26 @@ object YouTubeAccessibilityInspector {
             // Track miniplayer bar container in case its close button lacks text/desc
             if (miniContainerNode == null && MINIPLAYER_ID_TOKENS.any { resId.contains(it) }) {
                 node.getBoundsInScreen(bounds)
-                if (bounds.top >= miniBarTopMin && bounds.height() in 36..(screenHeight * 0.22f).toInt()) {
+                if (bounds.top >= miniBarTopMin && bounds.bottom <= miniBarBottomMax &&
+                    bounds.height() in 32..(screenHeight * 0.24f).toInt()
+                ) {
                     miniContainerNode = node
+                }
+            }
+
+            // Track Play/Pause button in the bottom miniplayer band so we can click its right-hand sibling (×)
+            if (miniPlayButtonNode == null && (
+                    desc == "pause video" || desc == "play video" || desc == "replay video" ||
+                        desc == "pause" || desc == "play" || resId.contains("miniplayer_play")
+                    )
+            ) {
+                node.getBoundsInScreen(bounds)
+                if (bounds.top >= miniBarTopMin && bounds.bottom <= miniBarBottomMax &&
+                    bounds.left >= (screenWidth * 0.45f).toInt() &&
+                    bounds.height() in 16..(screenHeight * 0.14f).toInt()
+                ) {
+                    miniPlayButtonNode = node
+                    miniPlayBounds.set(bounds)
                 }
             }
 
@@ -355,7 +524,30 @@ object YouTubeAccessibilityInspector {
             }
         }
 
-        // Fallback: inside the detected miniplayer container, click the rightmost small clickable button (×)
+        // Structural fallback 1: click the clickable sibling immediately to the right of miniplayer Play/Pause!
+        // Works on Morphe YT / ReVanced even when the × button has stripped IDs and empty contentDescription.
+        miniPlayButtonNode?.parent?.let { parent ->
+            var bestSibling: AccessibilityNodeInfo? = null
+            var maxRight = miniPlayBounds.right
+            val sibBounds = Rect()
+            for (i in 0 until parent.childCount.coerceAtMost(12)) {
+                val sib = parent.getChild(i) ?: continue
+                if (sib == miniPlayButtonNode) continue
+                sib.getBoundsInScreen(sibBounds)
+                if (sibBounds.left >= miniPlayBounds.right - 12 &&
+                    sibBounds.right > maxRight &&
+                    sibBounds.width() in 16..(screenWidth * 0.24f).toInt()
+                ) {
+                    maxRight = sibBounds.right
+                    bestSibling = sib
+                }
+            }
+            if (bestSibling != null && clickNodeOrParent(bestSibling)) {
+                return true
+            }
+        }
+
+        // Structural fallback 2: inside the detected miniplayer container, click the rightmost small clickable button (×)
         miniContainerNode?.let { container ->
             var rightmostNode: AccessibilityNodeInfo? = null
             var maxRight = -1
@@ -384,34 +576,63 @@ object YouTubeAccessibilityInspector {
     }
 
     /**
-     * Exits YouTube Shorts cleanly by clicking YouTube's bottom navigation "Home" tab
-     * so Shorts stops immediately while staying inside YouTube (no app exit / no PiP).
+     * Exits YouTube Shorts cleanly by switching to any available non-Shorts bottom navigation tab
+     * (whatever default/custom tabs the user configured in Official YouTube, Morphe YT, or ReVanced:
+     * Home, Subscriptions, History, Library, You, etc.) so Shorts stops immediately inside the app
+     * without assuming a "Home" tab exists and without exiting to Android Home.
      */
     fun tryNavigateShortsToHome(
         root: AccessibilityNodeInfo?,
-        screenHeight: Int
+        screenHeight: Int,
+        screenWidth: Int = 1080
     ): Boolean {
         if (root == null) return false
         val queue = ArrayDeque<AccessibilityNodeInfo>()
         queue.add(root)
         var visited = 0
         val bounds = Rect()
-        val bottomNavMinY = (screenHeight * 0.84f).toInt()
+        val bottomNavMinY = (screenHeight * 0.82f).toInt()
+        var preferredDefaultTab: AccessibilityNodeInfo? = null
+        var minTabLeft = Int.MAX_VALUE
 
-        while (queue.isNotEmpty() && visited < 130) {
+        while (queue.isNotEmpty() && visited < 160) {
             val node = queue.removeFirst()
             visited++
             val desc = node.contentDescription?.toString()?.lowercase().orEmpty()
             val text = node.text?.toString()?.lowercase().orEmpty()
-            if (desc == "home" || text == "home" || desc.startsWith("home, tab")) {
-                node.getBoundsInScreen(bounds)
-                if (bounds.top >= bottomNavMinY) {
-                    if (clickNodeOrParent(node)) return true
+            val resId = node.viewIdResourceName?.lowercase().orEmpty()
+
+            val isShortsOrCreate = desc.contains("shorts") || text.contains("shorts") ||
+                desc.contains("create") || text == "+" || desc == "create"
+
+            if (!isShortsOrCreate && !node.isSelected) {
+                val isTabLabel = desc == "home" || text == "home" || desc.endsWith(", tab") ||
+                    desc.contains("subscriptions") || text == "subscriptions" ||
+                    desc.contains("library") || text == "library" ||
+                    desc.contains("history") || text == "history" ||
+                    desc == "you" || text == "you" ||
+                    resId.contains("pivot_bar")
+
+                if (node.isClickable || isTabLabel) {
+                    node.getBoundsInScreen(bounds)
+                    if (bounds.top >= bottomNavMinY &&
+                        bounds.height() in 20..(screenHeight * 0.17f).toInt() &&
+                        bounds.width() in 20..(screenWidth * 0.45f).toInt() &&
+                        bounds.left < minTabLeft
+                    ) {
+                        minTabLeft = bounds.left
+                        preferredDefaultTab = node
+                    }
                 }
             }
+
             for (i in 0 until node.childCount.coerceAtMost(10)) {
                 node.getChild(i)?.let { queue.add(it) }
             }
+        }
+
+        if (preferredDefaultTab != null && clickNodeOrParent(preferredDefaultTab)) {
+            return true
         }
         return false
     }
