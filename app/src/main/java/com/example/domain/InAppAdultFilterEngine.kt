@@ -128,6 +128,13 @@ object InAppAdultFilterEngine {
                 "YmlraW5pIHRyeSBvbg==", "aG90IHdlYiBzZXJpZXM=", "dW5jZW5zb3JlZCBzY2VuZQ==",
                 "c2V4eSBkYW5jZQ==", "aG90IGRhbmNl", "c2V4IHN0b3J5", "c2V4IHN0b3JpZXM=",
                 "ZXJvdGljIHN0b3J5", "ZXJvdGljIG1vdmll", "YWR1bHQgbW92aWU=", "c29mdGNvcmUgbW92aWU=",
+                // Converging nude/naked visual photoshoot, model, and artistic-nudity phrases
+                // (keeps single ambiguous "naked"/"nude" medium so safe educational topics stay allowed)
+                "bnVkZSBhcnQ=", "bnVkZSBhcnRpc3RpYw==", "YXJ0aXN0aWMgbnVkZQ==",
+                "bnVkZSBwaG90b3Nob290", "bnVkZSBwaG90b2dyYXBoeQ==", "bnVkZSBtb2RlbA==",
+                "bnVkZSBtb2RlbHM=", "bnVkZSBwYWludGluZw==", "YXJ0aXN0aWMgbnVkaXR5",
+                "bmFrZWQgYXJ0", "bmFrZWQgYXJ0aXN0aWM=", "bmFrZWQgcGhvdG9zaG9vdA==",
+                "bmFrZWQgeW9nYQ==", "bmFrZWQgbW9kZWw=",
                 // 18+/A-rated, Adult OTT & Suggestive Movie/Trailer Clips
                 "Ym9sZCBzY2VuZQ==", "Ym9sZCBzY2VuZXM=", "aG90IHNjZW5l", "aG90IHNjZW5lcw==",
                 "a2lzc2luZyBzY2VuZQ==", "a2lzc2luZyBzY2VuZXM=", "YmVkcm9vbSBzY2VuZQ==",
@@ -197,9 +204,10 @@ object InAppAdultFilterEngine {
         "ramakrishna", "hanuman", "meditation", "mindfulness", "self control",
         "self-control", "conquer lust", "overcome lust", "control lust",
         // Anti-addiction & recovery framing
-        "addiction", "quit porn", "stop porn", "overcome porn", "beat porn",
+        "addiction", "quit porn", "stop porn", "overcome porn", "overcoming porn", "beat porn",
         "porn recovery", "porn addiction", "stop masturbation", "quit masturbation",
-        "overcome masturbation", "masturbation addiction", "nofap", "no fap",
+        "overcome masturbation", "overcoming masturbation", "overcoming lust", "overcoming addiction",
+        "masturbation addiction", "nofap", "no fap",
         "dopamine detox", "freedom from porn", "effects of porn", "side effects of porn",
         "harmful effects", "brain damage", "rewire your brain", "how to quit",
         "how to stop", "how to overcome", "recovery journey", "addiction recovery",
@@ -243,17 +251,16 @@ object InAppAdultFilterEngine {
 
     /**
      * Evaluates active page / video title + visible metadata snippets.
-     * Note: When YouTube Study Mode verifies the video belongs to an explicitly approved
-     * channel, callers pass `isApprovedYouTubeChannel = true` so approved spiritual/study
-     * channels discussing overcoming addiction are not falsely cut.
+     * Note: Approved YouTube channels NEVER receive a blanket exemption for explicit, nude,
+     * age-restricted, or mature media. Spiritual & anti-addiction recovery context is evaluated
+     * consistently across all channels so recovery talks remain allowed while inappropriate
+     * videos are still filtered even if uploaded to an approved channel.
      */
     fun evaluateActiveContent(
         urlOrQuery: String?,
         visibleSnippets: List<String>,
         isApprovedYouTubeChannel: Boolean = false
     ): DetectionResult {
-        if (isApprovedYouTubeChannel) return DetectionResult(false, 0)
-
         val matureMatch = MatureMediaCatalog.evaluateMatureMediaText(urlOrQuery, visibleSnippets)
         if (matureMatch.isFlagged) {
             return DetectionResult(true, 4, matureMatch.reason)

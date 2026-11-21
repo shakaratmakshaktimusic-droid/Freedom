@@ -15,7 +15,7 @@ data class ContentProtectionConfig(
     val youtubeStudyModeEnabled: Boolean = false,
     val youtubeMaskFeedCards: Boolean = false,
     val youtubeAllowShortsFromApproved: Boolean = false,
-    val youtubeAllowLiveFromApproved: Boolean = false,
+    val youtubeAllowLiveFromApproved: Boolean = true,
     val youtubeDataApiKey: String = "",
     val safeSearchEnabled: Boolean = true,
     val blockUnverifiedSearchEnginesInStrictMode: Boolean = true,

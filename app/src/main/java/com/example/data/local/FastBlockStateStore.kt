@@ -212,7 +212,7 @@ class FastBlockStateStore(context: Context) {
                 youtubeStudyModeEnabled = prefs.getBoolean(KEY_YT_STUDY_MODE, false),
                 youtubeMaskFeedCards = false,
                 youtubeAllowShortsFromApproved = prefs.getBoolean(KEY_YT_ALLOW_SHORTS, false),
-                youtubeAllowLiveFromApproved = prefs.getBoolean(KEY_YT_ALLOW_LIVE, false),
+                youtubeAllowLiveFromApproved = prefs.getBoolean(KEY_YT_ALLOW_LIVE_V2, true),
                 youtubeDataApiKey = prefs.getString(KEY_YT_API_KEY, "") ?: "",
                 safeSearchEnabled = true,
                 blockUnverifiedSearchEnginesInStrictMode = true,
@@ -238,7 +238,7 @@ class FastBlockStateStore(context: Context) {
             .putBoolean(KEY_YT_STUDY_MODE, enforced.youtubeStudyModeEnabled)
             .putBoolean(KEY_YT_MASK_FEED_CARDS, false)
             .putBoolean(KEY_YT_ALLOW_SHORTS, enforced.youtubeAllowShortsFromApproved)
-            .putBoolean(KEY_YT_ALLOW_LIVE, enforced.youtubeAllowLiveFromApproved)
+            .putBoolean(KEY_YT_ALLOW_LIVE_V2, enforced.youtubeAllowLiveFromApproved)
             .putString(KEY_YT_API_KEY, enforced.youtubeDataApiKey.trim())
             .putBoolean(KEY_SAFE_SEARCH_ENABLED, true)
             .putBoolean(KEY_BLOCK_UNVERIFIED_SEARCH, true)
@@ -350,7 +350,7 @@ class FastBlockStateStore(context: Context) {
         private const val KEY_YT_STUDY_MODE = "cp_yt_study_mode"
         private const val KEY_YT_MASK_FEED_CARDS = "cp_yt_mask_feed_cards"
         private const val KEY_YT_ALLOW_SHORTS = "cp_yt_allow_shorts"
-        private const val KEY_YT_ALLOW_LIVE = "cp_yt_allow_live"
+        private const val KEY_YT_ALLOW_LIVE_V2 = "cp_yt_allow_live_v2"
         private const val KEY_YT_API_KEY = "cp_yt_api_key"
         private const val KEY_SAFE_SEARCH_ENABLED = "cp_safe_search_enabled"
         private const val KEY_BLOCK_UNVERIFIED_SEARCH = "cp_block_unverified_search"

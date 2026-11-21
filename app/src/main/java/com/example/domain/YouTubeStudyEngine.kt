@@ -75,6 +75,36 @@ object YouTubeStudyEngine {
         }
     }
 
+    /**
+     * Explicit channel identity state for YouTube playback decisions:
+     *  - VERIFIED: Stable permanent 24-char `UC...` channel ID confirmed.
+     *  - PENDING: Async videoId -> `UC...` verification is in progress.
+     *  - UNKNOWN: Insufficient metadata (no verified permanent `UC...` ID available).
+     *  - FAILED: Verification failed, timed out, returned malformed metadata, or was inconsistent.
+     */
+    enum class ChannelAttributionStatus {
+        VERIFIED,
+        PENDING,
+        UNKNOWN,
+        FAILED
+    }
+
+    data class ChannelAttribution(
+        val status: ChannelAttributionStatus,
+        val channelId: String? = null,
+        val videoId: String? = null,
+        val observedHandle: String? = null,
+        val observedDisplayTitle: String? = null,
+        val failureReason: String? = null
+    ) {
+        val verifiedChannelId: String?
+            get() = if (status == ChannelAttributionStatus.VERIFIED && isValidPermanentChannelId(channelId)) {
+                channelId?.trim()
+            } else {
+                null
+            }
+    }
+
     data class ParsedYouTubeLink(
         val videoId: String? = null,
         val channelId: String? = null,
@@ -242,6 +272,13 @@ object YouTubeStudyEngine {
 
     /**
      * Evaluates an active Watch, Miniplayer, Shorts, or Live playback screen inside any supported YouTube client.
+     *
+     * Identity rules:
+     *  - When [attribution] is `VERIFIED`, approval is determined STRICTLY by the verified permanent
+     *    `UC...` channel ID (a spoofed display name or `@handle` can never override an unapproved ID).
+     *  - `PENDING` and `FAILED` attribution NEVER silently become approved.
+     *  - When a `videoId` is known and attribution is `UNKNOWN`, display-name guessing is forbidden:
+     *    returns [StudyDecision.NeedsVideoChannelVerification] (or fail-closed block in Strict Mode).
      */
     fun evaluateActivePlayback(
         screenMode: ScreenMode,
@@ -251,9 +288,17 @@ object YouTubeStudyEngine {
         approved: ApprovedChannelSnapshot,
         config: ContentProtectionConfig,
         strictMode: Boolean,
-        lastApprovedWatchActive: Boolean = false
+        lastApprovedWatchActive: Boolean = false,
+        attribution: ChannelAttribution? = null,
+        requireVerifiedChannelId: Boolean = false
     ): StudyDecision {
         if (!config.youtubeStudyModeEnabled) return StudyDecision.Allow
+
+        val effectiveAttribution = attribution ?: buildLegacyAttribution(
+            detectedChannelId = detectedChannelId,
+            detectedHandle = detectedHandle,
+            detectedChannelTitle = detectedChannelTitle
+        )
 
         // Shorts rule: blocked by default unless explicitly permitted AND from an approved channel
         if (screenMode == ScreenMode.SHORTS_PLAYER) {
@@ -264,27 +309,25 @@ object YouTubeStudyEngine {
                     cutAction = PlaybackCutAction.EXIT_SHORTS_TO_HOME
                 )
             }
-            val matched = approved.matchesAttribution(detectedChannelId, detectedHandle, detectedChannelTitle)
-            if (!matched) {
-                val hasAttribution = !detectedChannelId.isNullOrBlank() ||
-                    !detectedHandle.isNullOrBlank() ||
-                    !detectedChannelTitle.isNullOrBlank()
-                if (hasAttribution || strictMode) {
-                    return StudyDecision.BlockPlayback(
-                        reason = if (hasAttribution) {
-                            "Short from unapproved channel blocked"
-                        } else {
-                            "Unverified Short blocked in Strict Mode"
-                        },
-                        notificationText = "Only approved channels can play in Study Mode.",
-                        cutAction = PlaybackCutAction.EXIT_SHORTS_TO_HOME
-                    )
-                }
-            }
-            return StudyDecision.Allow
+            return evaluateAttributionForPlayer(
+                attribution = effectiveAttribution,
+                approved = approved,
+                strictMode = strictMode,
+                requireVerifiedChannelId = requireVerifiedChannelId,
+                cutAction = PlaybackCutAction.EXIT_SHORTS_TO_HOME,
+                isShort = true,
+                isLive = false,
+                allowFallbackToRecentApprovedWatch = false,
+                blockReasonLabel = "Short"
+            )
         }
 
-        // Live rule: blocked by default unless explicitly permitted AND from an approved channel
+        // Live rule: verified approved channels follow the same channel-approval policy as ordinary
+        // videos (unless the user explicitly disabled Live streams). Unapproved and unknown Live
+        // streams fail closed — an unknown channel NEVER becomes approved just because it is live.
+        // Passing `allowFallbackToRecentApprovedWatch = lastApprovedWatchActive` preserves playback
+        // when Live Chat or fullscreen temporarily hides the channel header on an ALREADY-verified
+        // approved Live session (any observed unapproved channel or video switch immediately overrides it).
         if (screenMode == ScreenMode.LIVE_PLAYER) {
             if (!config.youtubeAllowLiveFromApproved) {
                 return StudyDecision.BlockPlayback(
@@ -293,15 +336,25 @@ object YouTubeStudyEngine {
                     cutAction = PlaybackCutAction.CLOSE_WATCH_AND_MINIPLAYER
                 )
             }
-            val matched = approved.matchesAttribution(detectedChannelId, detectedHandle, detectedChannelTitle)
-            if (!matched) {
+            if (approved.isEmpty) {
                 return StudyDecision.BlockPlayback(
-                    reason = "Live stream from unapproved or unverified channel blocked",
-                    notificationText = "Only approved channels can play in Study Mode.",
+                    reason = "No approved channels configured in YouTube Study Mode",
+                    notificationText = "Add approved channels in Freedom Study Mode to watch live streams.",
                     cutAction = PlaybackCutAction.CLOSE_WATCH_AND_MINIPLAYER
                 )
             }
-            return StudyDecision.Allow
+            return evaluateAttributionForPlayer(
+                attribution = effectiveAttribution,
+                approved = approved,
+                strictMode = strictMode,
+                requireVerifiedChannelId = requireVerifiedChannelId,
+                cutAction = PlaybackCutAction.CLOSE_WATCH_AND_MINIPLAYER,
+                isShort = false,
+                isLive = true,
+                allowFallbackToRecentApprovedWatch = lastApprovedWatchActive,
+                blockReasonLabel = "Live stream",
+                failClosedOnEmptyUnknown = true
+            )
         }
 
         // In-app bottom Miniplayer: if an unapproved video collapsed here, close it immediately (×)
@@ -313,21 +366,18 @@ object YouTubeStudyEngine {
                     cutAction = PlaybackCutAction.CLOSE_MINIPLAYER_ONLY
                 )
             }
-            val matched = approved.matchesAttribution(detectedChannelId, detectedHandle, detectedChannelTitle)
-            if (matched) return StudyDecision.Allow
-
-            val hasAttribution = !detectedChannelId.isNullOrBlank() ||
-                !detectedHandle.isNullOrBlank() ||
-                !detectedChannelTitle.isNullOrBlank()
-
-            if (hasAttribution || !lastApprovedWatchActive) {
-                return StudyDecision.BlockPlayback(
-                    reason = "Unapproved video stopped in YouTube miniplayer",
-                    notificationText = "Video stopped — channel not in your Study Mode allowlist.",
-                    cutAction = PlaybackCutAction.CLOSE_MINIPLAYER_ONLY
-                )
-            }
-            return StudyDecision.Allow
+            return evaluateAttributionForPlayer(
+                attribution = effectiveAttribution,
+                approved = approved,
+                strictMode = strictMode,
+                requireVerifiedChannelId = requireVerifiedChannelId,
+                cutAction = PlaybackCutAction.CLOSE_MINIPLAYER_ONLY,
+                isShort = false,
+                isLive = false,
+                allowFallbackToRecentApprovedWatch = lastApprovedWatchActive,
+                blockReasonLabel = "Miniplayer video",
+                failClosedOnEmptyUnknown = !lastApprovedWatchActive
+            )
         }
 
         // Standard Watch Player screen
@@ -339,43 +389,183 @@ object YouTubeStudyEngine {
                     cutAction = PlaybackCutAction.CLOSE_WATCH_AND_MINIPLAYER
                 )
             }
-            val matched = approved.matchesAttribution(detectedChannelId, detectedHandle, detectedChannelTitle)
-            if (matched) return StudyDecision.Allow
-
-            val hasAttribution = !detectedChannelId.isNullOrBlank() ||
-                !detectedHandle.isNullOrBlank() ||
-                !detectedChannelTitle.isNullOrBlank()
-
-            if (hasAttribution) {
-                return StudyDecision.BlockPlayback(
-                    reason = "Video from unapproved YouTube channel blocked",
-                    notificationText = "Channel not in your Study Mode allowlist.",
-                    cutAction = PlaybackCutAction.CLOSE_WATCH_AND_MINIPLAYER
-                )
-            }
-
-            // Fail-closed in Strict Mode if channel attribution cannot be verified!
-            if (strictMode) {
-                return StudyDecision.BlockPlayback(
-                    reason = "Unverifiable YouTube channel blocked in Strict Mode",
-                    notificationText = "Playback blocked — channel could not be verified in Strict Mode.",
-                    cutAction = PlaybackCutAction.CLOSE_WATCH_AND_MINIPLAYER
-                )
-            }
+            return evaluateAttributionForPlayer(
+                attribution = effectiveAttribution,
+                approved = approved,
+                strictMode = strictMode,
+                requireVerifiedChannelId = requireVerifiedChannelId,
+                cutAction = PlaybackCutAction.CLOSE_WATCH_AND_MINIPLAYER,
+                isShort = false,
+                isLive = false,
+                allowFallbackToRecentApprovedWatch = false,
+                blockReasonLabel = "Video"
+            )
         }
 
         return StudyDecision.Allow
+    }
+
+    private fun buildLegacyAttribution(
+        detectedChannelId: String?,
+        detectedHandle: String?,
+        detectedChannelTitle: String?
+    ): ChannelAttribution {
+        val validCid = detectedChannelId?.trim()?.takeIf { isValidPermanentChannelId(it) }
+        val normHandle = normalizeHandle(detectedHandle).ifEmpty { null }
+        val cleanTitle = detectedChannelTitle?.trim()?.takeIf { it.isNotEmpty() }
+        return if (validCid != null) {
+            ChannelAttribution(
+                status = ChannelAttributionStatus.VERIFIED,
+                channelId = validCid,
+                observedHandle = normHandle,
+                observedDisplayTitle = cleanTitle
+            )
+        } else {
+            ChannelAttribution(
+                status = ChannelAttributionStatus.UNKNOWN,
+                channelId = null,
+                observedHandle = normHandle,
+                observedDisplayTitle = cleanTitle
+            )
+        }
+    }
+
+    private fun evaluateAttributionForPlayer(
+        attribution: ChannelAttribution,
+        approved: ApprovedChannelSnapshot,
+        strictMode: Boolean,
+        requireVerifiedChannelId: Boolean,
+        cutAction: PlaybackCutAction,
+        isShort: Boolean,
+        isLive: Boolean,
+        allowFallbackToRecentApprovedWatch: Boolean,
+        blockReasonLabel: String,
+        failClosedOnEmptyUnknown: Boolean = false
+    ): StudyDecision {
+        return when (attribution.status) {
+            ChannelAttributionStatus.VERIFIED -> {
+                val cid = attribution.verifiedChannelId
+                if (cid != null && approved.isChannelIdApproved(cid)) {
+                    StudyDecision.Allow
+                } else {
+                    StudyDecision.BlockPlayback(
+                        reason = "$blockReasonLabel from unapproved verified channel blocked",
+                        notificationText = "Channel not in your Study Mode allowlist.",
+                        cutAction = cutAction
+                    )
+                }
+            }
+
+            ChannelAttributionStatus.PENDING -> {
+                val vid = attribution.videoId
+                if (strictMode || vid.isNullOrBlank()) {
+                    StudyDecision.BlockPlayback(
+                        reason = "$blockReasonLabel blocked while channel verification is pending",
+                        notificationText = "Verifying channel identity — playback blocked until verified.",
+                        cutAction = cutAction
+                    )
+                } else {
+                    StudyDecision.NeedsVideoChannelVerification(
+                        videoId = vid,
+                        isShort = isShort,
+                        isLive = isLive
+                    )
+                }
+            }
+
+            ChannelAttributionStatus.FAILED -> {
+                StudyDecision.BlockPlayback(
+                    reason = "$blockReasonLabel blocked (channel verification failed: ${attribution.failureReason ?: "unverified"})",
+                    notificationText = "Playback blocked — channel identity could not be verified.",
+                    cutAction = cutAction
+                )
+            }
+
+            ChannelAttributionStatus.UNKNOWN -> {
+                // If a canonical videoId is known, NEVER guess from display name or handle!
+                val vid = attribution.videoId
+                if (!vid.isNullOrBlank()) {
+                    return if (strictMode) {
+                        StudyDecision.BlockPlayback(
+                            reason = "$blockReasonLabel blocked in Strict Mode until videoId channel is verified",
+                            notificationText = "Verifying channel identity — retry once verified.",
+                            cutAction = cutAction
+                        )
+                    } else {
+                        StudyDecision.NeedsVideoChannelVerification(
+                            videoId = vid,
+                            isShort = isShort,
+                            isLive = isLive
+                        )
+                    }
+                }
+
+                // If caller requires strict permanent UC... verification only, fail closed on UNKNOWN
+                if (requireVerifiedChannelId) {
+                    return StudyDecision.BlockPlayback(
+                        reason = "$blockReasonLabel blocked (no verified permanent channel ID)",
+                        notificationText = "Playback blocked — permanent channel ID could not be verified.",
+                        cutAction = cutAction
+                    )
+                }
+
+                // Native Android YouTube Accessibility without an exposed videoId/UC... ID:
+                // Match observed handle/title against already-verified approved channels WITHOUT
+                // fabricating a UC... ID, and fail closed on any unapproved or missing attribution.
+                val hasObservedMetadata = !attribution.observedHandle.isNullOrBlank() ||
+                    !attribution.observedDisplayTitle.isNullOrBlank()
+
+                if (hasObservedMetadata) {
+                    val matched = approved.matchesAttribution(
+                        channelId = null,
+                        handle = attribution.observedHandle,
+                        channelTitle = attribution.observedDisplayTitle
+                    )
+                    return if (matched) {
+                        StudyDecision.Allow
+                    } else {
+                        StudyDecision.BlockPlayback(
+                            reason = "$blockReasonLabel from unapproved YouTube channel blocked",
+                            notificationText = "Channel not in your Study Mode allowlist.",
+                            cutAction = cutAction
+                        )
+                    }
+                }
+
+                if (allowFallbackToRecentApprovedWatch) {
+                    return StudyDecision.Allow
+                }
+
+                if (strictMode || failClosedOnEmptyUnknown) {
+                    StudyDecision.BlockPlayback(
+                        reason = "Unverifiable $blockReasonLabel blocked (channel attribution unknown)",
+                        notificationText = "Playback blocked — channel could not be verified.",
+                        cutAction = cutAction
+                    )
+                } else {
+                    StudyDecision.Allow
+                }
+            }
+        }
     }
 
     /**
      * Pure decision helper for silent always-on Adult / Mature-Media protection inside YouTube,
      * Morphe YT, and YouTube ReVanced:
      *  - On active players (WATCH_PLAYER, LIVE_PLAYER, SHORTS_PLAYER, MINI_PLAYER): evaluates
-     *    the active video title + visible snippets and returns an IN-APP cut action (never exits app).
-     *  - On an active Search Results screen (`isSearchResultsScreen && !activeSearchQuery.isNullOrBlank()`):
-     *    evaluates ONLY the active search query and returns `EXIT_SEARCH_RESULTS` (single Back).
-     *  - On Home / Subscriptions / Profile / Watch History (`FEED_OR_SEARCH` without active explicit search):
-     *    returns `null` so old thumbnails in Watch History NEVER fire Back or exit Morphe YT.
+     *    the active video title + visible snippets + card labels and returns an IN-APP cut action.
+     *    Approved channels NEVER receive a blanket bypass for explicit/nude/mature media (spiritual
+     *    & anti-addiction recovery context is evaluated consistently inside InAppAdultFilterEngine).
+     *  - On an active Search Results screen (`isSearchResultsScreen`): evaluates combined search
+     *    query + visible result cards / playlist titles / thumbnail labels so ambiguous queries
+     *    like "naked" paired with explicit cards ("Nude Artistic Photoshoot", "Nude Art") cut
+     *    cleanly before opening a video, while safe educational results ("Naked Mole Rat",
+     *    "The Naked Truth About History") remain allowed.
+     *  - On Playlist screens (`isPlaylistScreen`): evaluates playlist title + visible item cards.
+     *  - On non-History Feed / Recommendations (`visibleCardSnippets` present & not Watch History):
+     *    cuts only when visible recommendation cards contain clear disallowed content.
+     *  - On Watch History / Library / You / Profile (`isWatchHistoryOrProfileScreen` or Watch
+     *    History header markers): ALWAYS returns `null` so old thumbnails NEVER bounce-exit Morphe YT.
      */
     fun evaluateInAppAdultCutAction(
         screenMode: ScreenMode,
@@ -383,17 +573,20 @@ object YouTubeStudyEngine {
         activeSearchQuery: String?,
         isSearchResultsScreen: Boolean,
         visibleSnippets: List<String>,
-        isApprovedYouTubeChannel: Boolean
+        isApprovedYouTubeChannel: Boolean,
+        isPlaylistScreen: Boolean = false,
+        isWatchHistoryOrProfileScreen: Boolean = false,
+        visibleCardSnippets: List<String> = emptyList()
     ): PlaybackCutAction? {
-        if (isApprovedYouTubeChannel) return null
+        val combinedSnippets = mergeSnippetsForEvaluation(visibleSnippets, visibleCardSnippets)
 
         return when (screenMode) {
             ScreenMode.WATCH_PLAYER,
             ScreenMode.LIVE_PLAYER -> {
                 val res = InAppAdultFilterEngine.evaluateActiveContent(
                     urlOrQuery = activeVideoTitle,
-                    visibleSnippets = visibleSnippets,
-                    isApprovedYouTubeChannel = false
+                    visibleSnippets = combinedSnippets,
+                    isApprovedYouTubeChannel = isApprovedYouTubeChannel
                 )
                 if (res.isFlagged) PlaybackCutAction.CLOSE_WATCH_AND_MINIPLAYER else null
             }
@@ -401,8 +594,8 @@ object YouTubeStudyEngine {
             ScreenMode.MINI_PLAYER -> {
                 val res = InAppAdultFilterEngine.evaluateActiveContent(
                     urlOrQuery = activeVideoTitle,
-                    visibleSnippets = visibleSnippets,
-                    isApprovedYouTubeChannel = false
+                    visibleSnippets = combinedSnippets,
+                    isApprovedYouTubeChannel = isApprovedYouTubeChannel
                 )
                 if (res.isFlagged) PlaybackCutAction.CLOSE_MINIPLAYER_ONLY else null
             }
@@ -410,23 +603,79 @@ object YouTubeStudyEngine {
             ScreenMode.SHORTS_PLAYER -> {
                 val res = InAppAdultFilterEngine.evaluateActiveContent(
                     urlOrQuery = activeVideoTitle,
-                    visibleSnippets = visibleSnippets,
-                    isApprovedYouTubeChannel = false
+                    visibleSnippets = combinedSnippets,
+                    isApprovedYouTubeChannel = isApprovedYouTubeChannel
                 )
                 if (res.isFlagged) PlaybackCutAction.EXIT_SHORTS_TO_HOME else null
             }
 
             ScreenMode.FEED_OR_SEARCH,
             ScreenMode.CHANNEL_PAGE -> {
-                if (isSearchResultsScreen && !activeSearchQuery.isNullOrBlank()) {
-                    val queryRes = InAppAdultFilterEngine.evaluateQueryOrUrl(activeSearchQuery)
-                    if (queryRes.isFlagged) PlaybackCutAction.EXIT_SEARCH_RESULTS else null
-                } else {
-                    // NEVER fire Back on Home, Subscriptions, Profile, or Watch History thumbnails!
-                    null
+                // Hard invariant: NEVER fire Back on Watch History, Library, or Profile screens!
+                val looksLikeWatchHistoryHeader = isWatchHistoryOrProfileScreen ||
+                    (!isSearchResultsScreen && !isPlaylistScreen && visibleSnippets.take(4).any { s ->
+                        val lower = s.trim().lowercase()
+                        lower == "history" || lower == "watch history" || lower == "library"
+                    })
+                if (looksLikeWatchHistoryHeader) {
+                    return null
                 }
+
+                // 1. Active YouTube Search Results: combine query + visible result cards / playlists
+                if (isSearchResultsScreen) {
+                    val searchRes = InAppAdultFilterEngine.evaluateActiveContent(
+                        urlOrQuery = activeSearchQuery,
+                        visibleSnippets = combinedSnippets,
+                        isApprovedYouTubeChannel = false
+                    )
+                    return if (searchRes.isFlagged) PlaybackCutAction.EXIT_SEARCH_RESULTS else null
+                }
+
+                // 2. Open Playlist screen: inspect playlist title + visible playlist cards
+                if (isPlaylistScreen) {
+                    val playlistRes = InAppAdultFilterEngine.evaluateActiveContent(
+                        urlOrQuery = activeVideoTitle,
+                        visibleSnippets = combinedSnippets,
+                        isApprovedYouTubeChannel = false
+                    )
+                    return if (playlistRes.isFlagged) PlaybackCutAction.EXIT_SEARCH_RESULTS else null
+                }
+
+                // 3. Non-History Feed / Recommendations: evaluate explicit visible recommendation cards only
+                if (visibleCardSnippets.isNotEmpty()) {
+                    var highConfidenceHits = 0
+                    for (card in visibleCardSnippets.take(24)) {
+                        val cardRes = InAppAdultFilterEngine.evaluateCardText(listOf(card))
+                        if (cardRes.isFlagged && cardRes.confidenceScore >= 4) {
+                            highConfidenceHits++
+                            if (highConfidenceHits >= 1) {
+                                return PlaybackCutAction.EXIT_SEARCH_RESULTS
+                            }
+                        }
+                    }
+                }
+                null
             }
         }
+    }
+
+    private fun mergeSnippetsForEvaluation(
+        primary: List<String>,
+        secondary: List<String>
+    ): List<String> {
+        if (secondary.isEmpty()) return primary
+        if (primary.isEmpty()) return secondary
+        val seen = HashSet<String>((primary.size + secondary.size) * 2)
+        val out = ArrayList<String>(primary.size + secondary.size)
+        for (item in primary) {
+            val key = item.trim().lowercase()
+            if (key.isNotEmpty() && seen.add(key)) out.add(item)
+        }
+        for (item in secondary) {
+            val key = item.trim().lowercase()
+            if (key.isNotEmpty() && seen.add(key)) out.add(item)
+        }
+        return out
     }
 
     /**

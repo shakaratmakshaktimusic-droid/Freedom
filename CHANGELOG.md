@@ -5,6 +5,19 @@ All notable changes to **Freedom** are documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Universal Content Detection Upgrade**:
+  - Single-pass bounded `BrowserUrlExtractor.collectCombinedContentEvidence` combines page text with visible card/thumbnail/recommendation `text` and `contentDescription` labels, deduplicates evidence, and uses actual Android display dimensions (`WindowManager.currentWindowMetrics` / `resources.displayMetrics` — never inferred from `AccessibilityNodeInfo` root bounds).
+  - Integrated combined evidence into `UnknownSiteClassifier`, Browser/WebView DOM protection, and native third-party app protection without weakening classification thresholds, adding OCR/ML, or adding continuous polling.
+- **Reliable YouTube Channel Identification (`YouTubeChannelVerificationTracker`)**:
+  - Explicit channel attribution states (`VERIFIED`, `PENDING`, `UNKNOWN`, `FAILED`) eliminating hardcoded `detectedChannelId = null` and preventing display-name/handle spoofing.
+  - Video-session-bound asynchronous verification keyed by `videoId` with duplicate-lookup deduplication, bounded LRU + TTL cache, stale-result discarding on video switches, and fail-closed Strict Mode guarantees.
+- **YouTube Live Streaming Support for Verified Approved Channels**:
+  - Enabled verified approved-channel Live streams by default (`youtubeAllowLiveFromApproved = true` with migrated `cp_yt_allow_live_v2` preference) while keeping unapproved and unknown Live streams strictly blocked.
+  - Added Live Chat / `"Top chat"` / `"watching now"` player detection in `YouTubeAccessibilityInspector`, `/live/<videoId>` HTML + `externalChannelId` fallback in `YouTubeChannelResolver`, and strict separation between Android PiP mode (`win.isPip`) and YouTube's in-app bottom miniplayer (`ScreenMode.MINI_PLAYER`).
+- **Delayed DOM Re-Classification, Scrolled-WebView Coverage & YouTube In-App Search/Playlist/Fast-Miniplayer Fixes**:
+  - Fixed premature pre-load DOM classification lockout (allows one bounded re-check once DOM snippets render) and scrolled-WebView empty-URL-bar skipping.
+  - Upgraded YouTube in-app Search Results, Playlist, and non-History recommendation filtering (catching converging queries like `"naked"` + `"Nude Artistic Photoshoot"` / `"Nude Art"` while preserving safe educational queries and Watch History bounce-free behavior).
+  - Added Signal 2c (bottom-band Close/ProgressBar miniplayer detection) plus a single bounded 360ms follow-up re-scan to stop fast swipe-down-before-buffering miniplayer bypasses.
 - **Mature Media & Piracy Portal Catalog (`MatureMediaCatalog`)**:
   - On-device hashed database of 18+/TV-MA/adult web series and explicit films (e.g., *Shameless*, *Euphoria*, *Spartacus*, *Gandii Baat*, *Charmsukh*, *365 Days*, *Fifty Shades*, *Lust Stories*, *Mirzapur*, etc.) enforced across YouTube and browsers without false-flagging ordinary non-media text.
   - Permanent structural detector for free movie streaming sites, piracy download portals, offline saved pages, and stream-aggregator directories (`WEB-DL`, `HDRip`, `480p | 720p | 1080p`, `Dual Audio`, `External Subs`, `Stream Aggregators`, `TV SHOW` + `WEB SERIES`, `IMDb`/`TMDB` streaming pages, and rotating mirrors).

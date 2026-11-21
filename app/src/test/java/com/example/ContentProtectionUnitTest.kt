@@ -712,6 +712,712 @@ class ContentProtectionUnitTest {
     }
 
     @Test
+    fun stage1_universalContentDetection_mergesAndDeduplicatesPageAndCardEvidenceWithoutWeakeningThresholds() {
+        // 1. Merges page text + visible card/thumbnail accessibility labels, deduplicating case/whitespace
+        val merged = com.example.blocker.BrowserUrlExtractor.mergeAndDeduplicateEvidence(
+            pageSnippets = listOf("Watch Online", "R", "  watch   online ", "A"),
+            cardSnippets = listOf("watch online", "HD 1080p Dual Audio WEB-DL", "18+", "hd 1080p dual audio web-dl"),
+            maxTotal = 16
+        )
+        assertEquals(
+            listOf("Watch Online", "R", "A", "HD 1080p Dual Audio WEB-DL", "18+"),
+            merged
+        )
+
+        // 2. Single suspicious word on a visible card must NOT independently trigger a block
+        val singleSuspiciousCard = com.example.blocker.BrowserUrlExtractor.mergeAndDeduplicateEvidence(
+            pageSnippets = listOf("History Museum Blog", "Weekly Newsletter"),
+            cardSnippets = listOf("Naked mole rat biology facts"),
+            maxTotal = 16
+        )
+        assertFalse(
+            "Single medium word on a visible card must not independently trigger a block",
+            InAppAdultFilterEngine.evaluateActiveContent(
+                urlOrQuery = "https://historyblog.example.org/animals",
+                visibleSnippets = singleSuspiciousCard
+            ).isFlagged
+        )
+
+        // 3. Combined page + card evidence strengthens existing UnknownSiteClassifier & MatureMediaCatalog
+        val combinedPiracyEvidence = com.example.blocker.BrowserUrlExtractor.mergeAndDeduplicateEvidence(
+            pageSnippets = listOf("Latest Releases", "R"),
+            cardSnippets = listOf(
+                "Watch Free HD Movies Online - Dual Audio 720p 1080p WEB-DL",
+                "Stream Aggregators & External Subs · TV SHOW · WEB SERIES"
+            ),
+            maxTotal = 24
+        )
+        assertTrue(
+            "Combined page + card evidence must catch unknown piracy/streaming hubs through existing classifiers",
+            com.example.domain.MatureMediaCatalog.isInAppPiracyAggregator(combinedPiracyEvidence) ||
+                com.example.domain.MatureMediaCatalog.scorePiracyOrUnmoderatedMediaSite(
+                    host = "unknown-mirror-xyz.example",
+                    fullUrl = "https://unknown-mirror-xyz.example/movies",
+                    visibleTextSnippets = combinedPiracyEvidence
+                ) >= 6
+        )
+    }
+
+    @Test
+    fun stage2_youtubeInAppSearchPlaylistsRecommendations_andDelayedDomClassificationTests() {
+        // 1. Searching "naked" with "Nude Artistic Photoshoot" / "Nude Art" cards/playlists -> BLOCKED before opening a video!
+        val nakedSearchAction = YouTubeStudyEngine.evaluateInAppAdultCutAction(
+            screenMode = YouTubeStudyEngine.ScreenMode.FEED_OR_SEARCH,
+            activeVideoTitle = null,
+            activeSearchQuery = "naked",
+            isSearchResultsScreen = true,
+            visibleSnippets = listOf("naked", "Videos", "Playlists"),
+            isApprovedYouTubeChannel = false,
+            visibleCardSnippets = listOf(
+                "Nude Artistic Photoshoot - Behind the Scenes",
+                "Nude Art · Playlist · 24 videos"
+            )
+        )
+        assertEquals(
+            "Searching 'naked' with nude photoshoot/art cards must cut in-app before opening a video",
+            YouTubeStudyEngine.PlaybackCutAction.EXIT_SEARCH_RESULTS,
+            nakedSearchAction
+        )
+
+        // 2. Searching safe educational content with ambiguous words -> ALLOWED
+        val nakedMoleRatAction = YouTubeStudyEngine.evaluateInAppAdultCutAction(
+            screenMode = YouTubeStudyEngine.ScreenMode.FEED_OR_SEARCH,
+            activeVideoTitle = null,
+            activeSearchQuery = "naked mole rat documentary",
+            isSearchResultsScreen = true,
+            visibleSnippets = listOf("naked mole rat documentary", "National Geographic"),
+            isApprovedYouTubeChannel = false,
+            visibleCardSnippets = listOf(
+                "Naked Mole Rat Documentary - Underground Colonies",
+                "How Naked Mole Rats Survive Without Oxygen"
+            )
+        )
+        assertEquals("Safe educational documentary with 'naked' must stay allowed", null, nakedMoleRatAction)
+
+        val nakedTruthAction = YouTubeStudyEngine.evaluateInAppAdultCutAction(
+            screenMode = YouTubeStudyEngine.ScreenMode.FEED_OR_SEARCH,
+            activeVideoTitle = null,
+            activeSearchQuery = "the naked truth about history",
+            isSearchResultsScreen = true,
+            visibleSnippets = listOf("the naked truth about history", "Ancient Civilizations"),
+            isApprovedYouTubeChannel = false,
+            visibleCardSnippets = listOf("The Naked Truth About Roman Engineering")
+        )
+        assertEquals("Safe idiom 'the naked truth' must stay allowed", null, nakedTruthAction)
+
+        // 3. Opening a playlist containing disallowed content -> BLOCKED
+        val playlistAction = YouTubeStudyEngine.evaluateInAppAdultCutAction(
+            screenMode = YouTubeStudyEngine.ScreenMode.FEED_OR_SEARCH,
+            activeVideoTitle = "Nude Art",
+            activeSearchQuery = null,
+            isSearchResultsScreen = false,
+            visibleSnippets = listOf("Nude Art", "Play all", "Shuffle"),
+            isApprovedYouTubeChannel = false,
+            isPlaylistScreen = true,
+            visibleCardSnippets = listOf("Nude Artistic Photoshoot Part 1", "Artistic Nude Studio")
+        )
+        assertEquals(
+            "Opening a playlist with disallowed content must cut cleanly",
+            YouTubeStudyEngine.PlaybackCutAction.EXIT_SEARCH_RESULTS,
+            playlistAction
+        )
+
+        // 4. Viewing non-History recommendations containing disallowed content -> BLOCKED
+        val badRecommendationsAction = YouTubeStudyEngine.evaluateInAppAdultCutAction(
+            screenMode = YouTubeStudyEngine.ScreenMode.FEED_OR_SEARCH,
+            activeVideoTitle = null,
+            activeSearchQuery = null,
+            isSearchResultsScreen = false,
+            visibleSnippets = listOf("Home", "Subscriptions", "All"),
+            isApprovedYouTubeChannel = false,
+            isWatchHistoryOrProfileScreen = false,
+            visibleCardSnippets = listOf("Nude Artistic Photoshoot 4K", "Artistic Nude Photography")
+        )
+        assertEquals(
+            "Non-History recommendations showing explicit/nude cards must be blocked",
+            YouTubeStudyEngine.PlaybackCutAction.EXIT_SEARCH_RESULTS,
+            badRecommendationsAction
+        )
+
+        // 5. Watch History / Profile screen STILL NEVER bounce-exits Morphe YT!
+        val historyScreenAction = YouTubeStudyEngine.evaluateInAppAdultCutAction(
+            screenMode = YouTubeStudyEngine.ScreenMode.FEED_OR_SEARCH,
+            activeVideoTitle = null,
+            activeSearchQuery = null,
+            isSearchResultsScreen = false,
+            visibleSnippets = listOf("Watch history", "You"),
+            isApprovedYouTubeChannel = false,
+            isWatchHistoryOrProfileScreen = true,
+            visibleCardSnippets = listOf("Nude Artistic Photoshoot 4K")
+        )
+        assertEquals("Watch History/Profile screen must never bounce-exit", null, historyScreenAction)
+
+        // 6. Searching for an approved educational channel -> ALLOWED
+        val approvedSearchAction = YouTubeStudyEngine.evaluateInAppAdultCutAction(
+            screenMode = YouTubeStudyEngine.ScreenMode.FEED_OR_SEARCH,
+            activeVideoTitle = null,
+            activeSearchQuery = "3Blue1Brown essence of calculus",
+            isSearchResultsScreen = true,
+            visibleSnippets = listOf("3Blue1Brown essence of calculus", "3Blue1Brown"),
+            isApprovedYouTubeChannel = false,
+            visibleCardSnippets = listOf("The essence of calculus - 3Blue1Brown")
+        )
+        assertEquals("Searching an approved educational channel must stay allowed", null, approvedSearchAction)
+
+        // 7. Approved channel: normal educational video ALLOWED, explicit/nude video STILL BLOCKED!
+        val approvedNormalVideo = YouTubeStudyEngine.evaluateInAppAdultCutAction(
+            screenMode = YouTubeStudyEngine.ScreenMode.WATCH_PLAYER,
+            activeVideoTitle = "Essence of Linear Algebra",
+            activeSearchQuery = null,
+            isSearchResultsScreen = false,
+            visibleSnippets = listOf("3Blue1Brown", "Subscribe", "Comments"),
+            isApprovedYouTubeChannel = true
+        )
+        assertEquals("Normal video from an approved channel must play", null, approvedNormalVideo)
+
+        val approvedExplicitVideo = YouTubeStudyEngine.evaluateInAppAdultCutAction(
+            screenMode = YouTubeStudyEngine.ScreenMode.WATCH_PLAYER,
+            activeVideoTitle = "Nude Artistic Photoshoot",
+            activeSearchQuery = null,
+            isSearchResultsScreen = false,
+            visibleSnippets = listOf("Nude Artistic Photoshoot", "Subscribe", "Comments"),
+            isApprovedYouTubeChannel = true
+        )
+        assertEquals(
+            "Inappropriate video must still be blocked even if uploaded to an approved channel",
+            YouTubeStudyEngine.PlaybackCutAction.CLOSE_WATCH_AND_MINIPLAYER,
+            approvedExplicitVideo
+        )
+
+        // 8. Delayed WebView DOM classification: allows ONE bounded follow-up pass when initial scan ran pre-load
+        assertTrue(
+            com.example.blocker.FreedomAccessibilityService.shouldEvaluateUnknownSiteClassification(
+                isNewUrl = true,
+                lastEvidenceCount = 0,
+                lastAttempts = 0,
+                currentEvidenceCount = 2
+            )
+        )
+        assertFalse(
+            "Still-empty DOM must not waste a second classification attempt",
+            com.example.blocker.FreedomAccessibilityService.shouldEvaluateUnknownSiteClassification(
+                isNewUrl = false,
+                lastEvidenceCount = 2,
+                lastAttempts = 1,
+                currentEvidenceCount = 3
+            )
+        )
+        assertTrue(
+            "Once DOM content renders (>=6 snippets), allow ONE bounded re-classification on same URL",
+            com.example.blocker.FreedomAccessibilityService.shouldEvaluateUnknownSiteClassification(
+                isNewUrl = false,
+                lastEvidenceCount = 2,
+                lastAttempts = 1,
+                currentEvidenceCount = 12
+            )
+        )
+        assertFalse(
+            "Never exceed 2 classification evaluations per URL",
+            com.example.blocker.FreedomAccessibilityService.shouldEvaluateUnknownSiteClassification(
+                isNewUrl = false,
+                lastEvidenceCount = 2,
+                lastAttempts = 2,
+                currentEvidenceCount = 20
+            )
+        )
+    }
+
+    @Test
+    fun stage3_reliableYouTubeChannelIdentification_andAsyncVideoSwitchSafety() {
+        // 1. Canonical ID extraction ONLY parses real YouTube URLs / canonical UC... IDs — NEVER guesses from names or @handles
+        val (vidWatch, cidWatch) = com.example.blocker.YouTubeAccessibilityInspector.extractCanonicalIdsFromText(
+            "https://www.youtube.com/watch?v=aircAruvnKk"
+        )
+        assertEquals("aircAruvnKk", vidWatch)
+        assertEquals(null, cidWatch)
+
+        val (vidLive, _) = com.example.blocker.YouTubeAccessibilityInspector.extractCanonicalIdsFromText(
+            "https://www.youtube.com/live/LiveStrm123"
+        )
+        assertEquals("LiveStrm123", vidLive)
+
+        val (_, cidDirect) = com.example.blocker.YouTubeAccessibilityInspector.extractCanonicalIdsFromText(
+            "https://www.youtube.com/channel/UCYO_jab_esuFRV4b17AJtAw"
+        )
+        assertEquals("UCYO_jab_esuFRV4b17AJtAw", cidDirect)
+
+        val (vidFromHandle, cidFromHandle) = com.example.blocker.YouTubeAccessibilityInspector.extractCanonicalIdsFromText("@3blue1brown")
+        assertEquals("Handle must never be treated as a verified UC... channel ID", null, cidFromHandle)
+        assertEquals(null, vidFromHandle)
+
+        val (vidFromName, cidFromName) = com.example.blocker.YouTubeAccessibilityInspector.extractCanonicalIdsFromText("3Blue1Brown")
+        assertEquals("Display name must never be guessed as a UC... channel ID", null, cidFromName)
+        assertEquals(null, vidFromName)
+
+        // 2. Spoofed display name / handle CANNOT override a VERIFIED unapproved permanent UC... ID
+        val spoofedAttribution = YouTubeStudyEngine.ChannelAttribution(
+            status = YouTubeStudyEngine.ChannelAttributionStatus.VERIFIED,
+            channelId = "UCuAXFkgsw1L7xaCfnd5JJOw", // Unapproved permanent ID
+            videoId = "dQw4w9WgXcQ",
+            observedHandle = "@3blue1brown",
+            observedDisplayTitle = "3Blue1Brown"
+        )
+        val spoofDecision = YouTubeStudyEngine.evaluateActivePlayback(
+            screenMode = YouTubeStudyEngine.ScreenMode.WATCH_PLAYER,
+            detectedChannelId = spoofedAttribution.verifiedChannelId,
+            detectedHandle = "@3blue1brown",
+            detectedChannelTitle = "3Blue1Brown",
+            approved = approvedSnapshot,
+            config = studyConfig,
+            strictMode = false,
+            attribution = spoofedAttribution
+        )
+        assertTrue(
+            "Verified unapproved UC... ID must block even if display name/handle spoofs an approved channel",
+            spoofDecision is YouTubeStudyEngine.StudyDecision.BlockPlayback
+        )
+
+        // 3. PENDING and FAILED attribution NEVER silently become approved
+        val pendingAttr = YouTubeStudyEngine.ChannelAttribution(
+            status = YouTubeStudyEngine.ChannelAttributionStatus.PENDING,
+            videoId = "NewVideo123",
+            observedHandle = "@3blue1brown",
+            observedDisplayTitle = "3Blue1Brown"
+        )
+        val pendingNonStrict = YouTubeStudyEngine.evaluateActivePlayback(
+            screenMode = YouTubeStudyEngine.ScreenMode.WATCH_PLAYER,
+            detectedChannelId = null,
+            detectedHandle = "@3blue1brown",
+            detectedChannelTitle = "3Blue1Brown",
+            approved = approvedSnapshot,
+            config = studyConfig,
+            strictMode = false,
+            attribution = pendingAttr
+        )
+        assertTrue(
+            "PENDING attribution must never silently become Allow",
+            pendingNonStrict is YouTubeStudyEngine.StudyDecision.NeedsVideoChannelVerification
+        )
+        val pendingStrict = YouTubeStudyEngine.evaluateActivePlayback(
+            screenMode = YouTubeStudyEngine.ScreenMode.WATCH_PLAYER,
+            detectedChannelId = null,
+            detectedHandle = "@3blue1brown",
+            detectedChannelTitle = "3Blue1Brown",
+            approved = approvedSnapshot,
+            config = studyConfig,
+            strictMode = true,
+            attribution = pendingAttr
+        )
+        assertTrue(
+            "PENDING attribution must fail closed in Strict Mode",
+            pendingStrict is YouTubeStudyEngine.StudyDecision.BlockPlayback
+        )
+
+        val failedAttr = YouTubeStudyEngine.ChannelAttribution(
+            status = YouTubeStudyEngine.ChannelAttributionStatus.FAILED,
+            videoId = "NewVideo123",
+            failureReason = "Timeout"
+        )
+        val failedDecision = YouTubeStudyEngine.evaluateActivePlayback(
+            screenMode = YouTubeStudyEngine.ScreenMode.WATCH_PLAYER,
+            detectedChannelId = null,
+            detectedHandle = "@3blue1brown",
+            detectedChannelTitle = "3Blue1Brown",
+            approved = approvedSnapshot,
+            config = studyConfig,
+            strictMode = false,
+            attribution = failedAttr
+        )
+        assertTrue("FAILED attribution must block playback", failedDecision is YouTubeStudyEngine.StudyDecision.BlockPlayback)
+
+        // 4. Video-ID-keyed tracker: dedup concurrent lookups, discard stale results after switching videos, bound cache & TTL
+        val tracker = com.example.domain.YouTubeChannelVerificationTracker(
+            maxCacheEntries = 2,
+            verifiedTtlMs = 10_000L,
+            failedTtlMs = 5_000L
+        )
+        val resA1 = tracker.evaluateCurrentPlayback(
+            activeVideoId = "VideoA11111",
+            extractedChannelId = null,
+            observedHandle = "@3blue1brown",
+            observedDisplayTitle = "3Blue1Brown",
+            observedVideoTitle = "Video A",
+            persistedVideoToChannelMap = emptyMap(),
+            nowMs = 1_000L
+        )
+        assertEquals(YouTubeStudyEngine.ChannelAttributionStatus.PENDING, resA1.attribution.status)
+        assertEquals("VideoA11111", resA1.shouldStartAsyncLookupForVideoId)
+        assertTrue(tracker.isLookupInFlight("VideoA11111"))
+
+        // Duplicate observation of same videoId while in flight must NOT start a duplicate lookup
+        val resA2 = tracker.evaluateCurrentPlayback(
+            activeVideoId = "VideoA11111",
+            extractedChannelId = null,
+            observedHandle = "@3blue1brown",
+            observedDisplayTitle = "3Blue1Brown",
+            observedVideoTitle = "Video A",
+            persistedVideoToChannelMap = emptyMap(),
+            nowMs = 1_200L
+        )
+        assertEquals(YouTubeStudyEngine.ChannelAttributionStatus.PENDING, resA2.attribution.status)
+        assertEquals("Duplicate concurrent lookup must be prevented", null, resA2.shouldStartAsyncLookupForVideoId)
+
+        // User switches rapidly to VideoB before VideoA finishes!
+        val resB = tracker.evaluateCurrentPlayback(
+            activeVideoId = "VideoB22222",
+            extractedChannelId = null,
+            observedHandle = null,
+            observedDisplayTitle = "Other Channel",
+            observedVideoTitle = "Video B",
+            persistedVideoToChannelMap = emptyMap(),
+            nowMs = 1_400L
+        )
+        assertTrue("Switching videos must set videoSwitched = true", resB.videoSwitched)
+        assertEquals("VideoB22222", resB.shouldStartAsyncLookupForVideoId)
+
+        // Stale VideoA lookup completes AFTER switching to VideoB -> must NOT apply to VideoB!
+        val staleCompletion = tracker.completeAsyncLookup(
+            videoId = "VideoA11111",
+            resolvedChannelId = "UCYO_jab_esuFRV4b17AJtAw",
+            nowMs = 1_600L
+        )
+        assertFalse(
+            "Stale verification result for previous video must be discarded for active video",
+            staleCompletion.appliedToCurrentVideo
+        )
+        assertEquals(YouTubeStudyEngine.ChannelAttributionStatus.VERIFIED, staleCompletion.attribution.status)
+
+        // Malformed channel ID from lookup -> FAILED (never verified)
+        val malformedCompletion = tracker.completeAsyncLookup(
+            videoId = "VideoB22222",
+            resolvedChannelId = "@not_a_uc_id",
+            nowMs = 1_700L
+        )
+        assertTrue(malformedCompletion.appliedToCurrentVideo)
+        assertEquals(YouTubeStudyEngine.ChannelAttributionStatus.FAILED, malformedCompletion.attribution.status)
+        assertEquals(null, malformedCompletion.attribution.verifiedChannelId)
+
+        // Bounded LRU cache eviction (maxCacheEntries = 2): adding 3rd video keeps size <= 2
+        tracker.completeAsyncLookup("VideoC33333", "UC4a-Gbdw7vOaccHmFo40b9g", nowMs = 1_800L)
+        assertTrue("Verification cache must stay strictly bounded", tracker.cachedSize() <= 2)
+
+        // Expired TTL entry is invalidated cleanly instead of being treated as permanent proof
+        val expiredCheck = tracker.evaluateCurrentPlayback(
+            activeVideoId = "VideoC33333",
+            extractedChannelId = null,
+            observedHandle = null,
+            observedDisplayTitle = null,
+            observedVideoTitle = "Video C",
+            persistedVideoToChannelMap = emptyMap(),
+            nowMs = 50_000L
+        )
+        assertEquals(
+            "Expired cached videoId must re-verify instead of trusting stale cache",
+            YouTubeStudyEngine.ChannelAttributionStatus.PENDING,
+            expiredCheck.attribution.status
+        )
+    }
+
+    @Test
+    fun stage4_youtubeLiveStreaming_approvedAllowed_unapprovedAndUnknownBlocked_miniplayerAndTransitions() {
+        // 1. Default ContentProtectionConfig enables Live streams for verified approved channels
+        val defaultStudyConfig = ContentProtectionConfig(youtubeStudyModeEnabled = true)
+        assertTrue(
+            "Default Study Mode config must allow Live streams from verified approved channels",
+            defaultStudyConfig.youtubeAllowLiveFromApproved
+        )
+
+        val approvedVerifiedAttribution = YouTubeStudyEngine.ChannelAttribution(
+            status = YouTubeStudyEngine.ChannelAttributionStatus.VERIFIED,
+            channelId = "UCYO_jab_esuFRV4b17AJtAw",
+            videoId = "LiveStrm123",
+            observedHandle = "@3blue1brown",
+            observedDisplayTitle = "3Blue1Brown"
+        )
+        val unapprovedVerifiedAttribution = YouTubeStudyEngine.ChannelAttribution(
+            status = YouTubeStudyEngine.ChannelAttributionStatus.VERIFIED,
+            channelId = "UC_unapprovedChannelId12",
+            videoId = "LiveUnap999",
+            observedHandle = "@randomstreamer",
+            observedDisplayTitle = "Random Streamer"
+        )
+
+        // 2. Normal uploaded VOD from verified approved channel -> Allow
+        assertEquals(
+            YouTubeStudyEngine.StudyDecision.Allow,
+            YouTubeStudyEngine.evaluateActivePlayback(
+                screenMode = YouTubeStudyEngine.ScreenMode.WATCH_PLAYER,
+                detectedChannelId = approvedVerifiedAttribution.verifiedChannelId,
+                detectedHandle = "@3blue1brown",
+                detectedChannelTitle = "3Blue1Brown",
+                approved = approvedSnapshot,
+                config = defaultStudyConfig,
+                strictMode = true,
+                attribution = approvedVerifiedAttribution
+            )
+        )
+
+        // 3. LIVE stream from that SAME verified approved channel -> Allow (normal & Strict Mode)
+        assertEquals(
+            "Verified approved channel Live stream must play just like normal videos",
+            YouTubeStudyEngine.StudyDecision.Allow,
+            YouTubeStudyEngine.evaluateActivePlayback(
+                screenMode = YouTubeStudyEngine.ScreenMode.LIVE_PLAYER,
+                detectedChannelId = approvedVerifiedAttribution.verifiedChannelId,
+                detectedHandle = "@3blue1brown",
+                detectedChannelTitle = "3Blue1Brown",
+                approved = approvedSnapshot,
+                config = defaultStudyConfig,
+                strictMode = true,
+                attribution = approvedVerifiedAttribution
+            )
+        )
+
+        // 4. Direct /live/<videoId> URLs follow exact channel-approval policy
+        val liveApprovedSnapshot = approvedSnapshot.copy(
+            videoToChannelIdCache = approvedSnapshot.videoToChannelIdCache +
+                ("LiveStrm123" to "UCYO_jab_esuFRV4b17AJtAw") +
+                ("LiveUnap999" to "UC_unapprovedChannelId12")
+        )
+        assertEquals(
+            "Cached verified approved /live/ URL must be allowed",
+            YouTubeStudyEngine.StudyDecision.Allow,
+            YouTubeStudyEngine.evaluateDirectYouTubeUrl(
+                rawUrl = "https://www.youtube.com/live/LiveStrm123?feature=share",
+                approved = liveApprovedSnapshot,
+                config = defaultStudyConfig,
+                strictMode = true
+            )
+        )
+        assertTrue(
+            "Cached unapproved /live/ URL must be blocked",
+            YouTubeStudyEngine.evaluateDirectYouTubeUrl(
+                rawUrl = "https://www.youtube.com/live/LiveUnap999",
+                approved = liveApprovedSnapshot,
+                config = defaultStudyConfig,
+                strictMode = true
+            ) is YouTubeStudyEngine.StudyDecision.BlockPlayback
+        )
+        val uncachedLiveDecision = YouTubeStudyEngine.evaluateDirectYouTubeUrl(
+            rawUrl = "https://www.youtube.com/live/LiveNew7777",
+            approved = liveApprovedSnapshot,
+            config = defaultStudyConfig,
+            strictMode = false
+        )
+        assertTrue(
+            "Uncached /live/ URL must require channel verification rather than blind allow",
+            uncachedLiveDecision is YouTubeStudyEngine.StudyDecision.NeedsVideoChannelVerification &&
+                uncachedLiveDecision.videoId == "LiveNew7777" &&
+                uncachedLiveDecision.isLive
+        )
+
+        // 5. LIVE stream from an unapproved verified channel -> BlockPlayback
+        val unapprovedLive = YouTubeStudyEngine.evaluateActivePlayback(
+            screenMode = YouTubeStudyEngine.ScreenMode.LIVE_PLAYER,
+            detectedChannelId = unapprovedVerifiedAttribution.verifiedChannelId,
+            detectedHandle = "@randomstreamer",
+            detectedChannelTitle = "Random Streamer",
+            approved = approvedSnapshot,
+            config = defaultStudyConfig,
+            strictMode = false,
+            attribution = unapprovedVerifiedAttribution
+        )
+        assertTrue("Unapproved Live stream must remain blocked", unapprovedLive is YouTubeStudyEngine.StudyDecision.BlockPlayback)
+        assertEquals(
+            YouTubeStudyEngine.PlaybackCutAction.CLOSE_WATCH_AND_MINIPLAYER,
+            (unapprovedLive as YouTubeStudyEngine.StudyDecision.BlockPlayback).cutAction
+        )
+
+        // 6. LIVE stream with unavailable / UNKNOWN channel metadata (NOT an active approved session) -> BLOCKED!
+        val unknownEmptyLive = YouTubeStudyEngine.evaluateActivePlayback(
+            screenMode = YouTubeStudyEngine.ScreenMode.LIVE_PLAYER,
+            detectedChannelId = null,
+            detectedHandle = null,
+            detectedChannelTitle = null,
+            approved = approvedSnapshot,
+            config = defaultStudyConfig,
+            strictMode = false,
+            lastApprovedWatchActive = false,
+            attribution = YouTubeStudyEngine.ChannelAttribution(
+                status = YouTubeStudyEngine.ChannelAttributionStatus.UNKNOWN
+            )
+        )
+        assertTrue(
+            "Unknown channel must NEVER automatically become approved simply because it is broadcasting live",
+            unknownEmptyLive is YouTubeStudyEngine.StudyDecision.BlockPlayback
+        )
+
+        // 7. LIVE stream with PENDING or FAILED attribution -> NEVER silently approved
+        val pendingLiveStrict = YouTubeStudyEngine.evaluateActivePlayback(
+            screenMode = YouTubeStudyEngine.ScreenMode.LIVE_PLAYER,
+            detectedChannelId = null,
+            detectedHandle = null,
+            detectedChannelTitle = null,
+            approved = approvedSnapshot,
+            config = defaultStudyConfig,
+            strictMode = true,
+            attribution = YouTubeStudyEngine.ChannelAttribution(
+                status = YouTubeStudyEngine.ChannelAttributionStatus.PENDING,
+                videoId = "LivePend111"
+            )
+        )
+        assertTrue(pendingLiveStrict is YouTubeStudyEngine.StudyDecision.BlockPlayback)
+
+        val pendingLiveNonStrict = YouTubeStudyEngine.evaluateActivePlayback(
+            screenMode = YouTubeStudyEngine.ScreenMode.LIVE_PLAYER,
+            detectedChannelId = null,
+            detectedHandle = null,
+            detectedChannelTitle = null,
+            approved = approvedSnapshot,
+            config = defaultStudyConfig,
+            strictMode = false,
+            attribution = YouTubeStudyEngine.ChannelAttribution(
+                status = YouTubeStudyEngine.ChannelAttributionStatus.PENDING,
+                videoId = "LivePend111"
+            )
+        )
+        assertTrue(
+            pendingLiveNonStrict is YouTubeStudyEngine.StudyDecision.NeedsVideoChannelVerification &&
+                pendingLiveNonStrict.isLive
+        )
+
+        val failedLive = YouTubeStudyEngine.evaluateActivePlayback(
+            screenMode = YouTubeStudyEngine.ScreenMode.LIVE_PLAYER,
+            detectedChannelId = null,
+            detectedHandle = null,
+            detectedChannelTitle = "3Blue1Brown",
+            approved = approvedSnapshot,
+            config = defaultStudyConfig,
+            strictMode = false,
+            attribution = YouTubeStudyEngine.ChannelAttribution(
+                status = YouTubeStudyEngine.ChannelAttributionStatus.FAILED,
+                videoId = "LiveFail222",
+                failureReason = "timeout"
+            )
+        )
+        assertTrue(failedLive is YouTubeStudyEngine.StudyDecision.BlockPlayback)
+
+        // 8. Approved Live stream with Live Chat temporarily covering channel header -> stays Allowed ONLY while same approved session is active
+        assertEquals(
+            "Already-verified approved Live session must not get killed when Live Chat hides channel header",
+            YouTubeStudyEngine.StudyDecision.Allow,
+            YouTubeStudyEngine.evaluateActivePlayback(
+                screenMode = YouTubeStudyEngine.ScreenMode.LIVE_PLAYER,
+                detectedChannelId = null,
+                detectedHandle = null,
+                detectedChannelTitle = null,
+                approved = approvedSnapshot,
+                config = defaultStudyConfig,
+                strictMode = true,
+                lastApprovedWatchActive = true,
+                attribution = YouTubeStudyEngine.ChannelAttribution(
+                    status = YouTubeStudyEngine.ChannelAttributionStatus.UNKNOWN
+                )
+            )
+        )
+        // But if an unapproved channel is observed on that player, it is IMMEDIATELY blocked even if lastApprovedWatchActive was true!
+        assertTrue(
+            YouTubeStudyEngine.evaluateActivePlayback(
+                screenMode = YouTubeStudyEngine.ScreenMode.LIVE_PLAYER,
+                detectedChannelId = null,
+                detectedHandle = "@randomstreamer",
+                detectedChannelTitle = "Random Streamer",
+                approved = approvedSnapshot,
+                config = defaultStudyConfig,
+                strictMode = false,
+                lastApprovedWatchActive = true
+            ) is YouTubeStudyEngine.StudyDecision.BlockPlayback
+        )
+
+        // 9. Explicit user opt-out (youtubeAllowLiveFromApproved = false) still blocks Live streams even for approved channels
+        assertTrue(
+            YouTubeStudyEngine.evaluateActivePlayback(
+                screenMode = YouTubeStudyEngine.ScreenMode.LIVE_PLAYER,
+                detectedChannelId = approvedVerifiedAttribution.verifiedChannelId,
+                detectedHandle = "@3blue1brown",
+                detectedChannelTitle = "3Blue1Brown",
+                approved = approvedSnapshot,
+                config = defaultStudyConfig.copy(youtubeAllowLiveFromApproved = false),
+                strictMode = false,
+                attribution = approvedVerifiedAttribution
+            ) is YouTubeStudyEngine.StudyDecision.BlockPlayback
+        )
+
+        // 10. YouTube In-App Miniplayer (distinct from Android PiP): approved Live stays allowed, unapproved Live closes miniplayer only
+        assertEquals(
+            YouTubeStudyEngine.StudyDecision.Allow,
+            YouTubeStudyEngine.evaluateActivePlayback(
+                screenMode = YouTubeStudyEngine.ScreenMode.MINI_PLAYER,
+                detectedChannelId = null,
+                detectedHandle = null,
+                detectedChannelTitle = null,
+                approved = approvedSnapshot,
+                config = defaultStudyConfig,
+                strictMode = true,
+                lastApprovedWatchActive = true
+            )
+        )
+        val unapprovedMiniLive = YouTubeStudyEngine.evaluateActivePlayback(
+            screenMode = YouTubeStudyEngine.ScreenMode.MINI_PLAYER,
+            detectedChannelId = null,
+            detectedHandle = "@randomstreamer",
+            detectedChannelTitle = "Random Streamer",
+            approved = approvedSnapshot,
+            config = defaultStudyConfig,
+            strictMode = false,
+            lastApprovedWatchActive = true
+        )
+        assertTrue(unapprovedMiniLive is YouTubeStudyEngine.StudyDecision.BlockPlayback)
+        assertEquals(
+            YouTubeStudyEngine.PlaybackCutAction.CLOSE_MINIPLAYER_ONLY,
+            (unapprovedMiniLive as YouTubeStudyEngine.StudyDecision.BlockPlayback).cutAction
+        )
+
+        // 11. Live <-> VOD transitions via YouTubeChannelVerificationTracker clear prior video attribution cleanly
+        val tracker = com.example.domain.YouTubeChannelVerificationTracker()
+        val liveStart = tracker.evaluateCurrentPlayback(
+            activeVideoId = "LiveStrm123",
+            extractedChannelId = "UCYO_jab_esuFRV4b17AJtAw",
+            observedHandle = "@3blue1brown",
+            observedDisplayTitle = "3Blue1Brown",
+            observedVideoTitle = "Live Q&A",
+            persistedVideoToChannelMap = emptyMap(),
+            nowMs = 1_000L
+        )
+        assertEquals(YouTubeStudyEngine.ChannelAttributionStatus.VERIFIED, liveStart.attribution.status)
+
+        val switchToVod = tracker.evaluateCurrentPlayback(
+            activeVideoId = "VodUnap4567",
+            extractedChannelId = null,
+            observedHandle = null,
+            observedDisplayTitle = "Other Creator",
+            observedVideoTitle = "Random VOD",
+            persistedVideoToChannelMap = emptyMap(),
+            nowMs = 1_500L
+        )
+        assertTrue("Switching from Live to VOD must trigger videoSwitched = true", switchToVod.videoSwitched)
+        assertEquals(YouTubeStudyEngine.ChannelAttributionStatus.PENDING, switchToVod.attribution.status)
+        assertEquals(null, switchToVod.attribution.verifiedChannelId)
+
+        // 12. Live player indicator helper catches active Live Chat / viewer counts without matching Home feed "Live" chip
+        assertTrue(com.example.blocker.YouTubeAccessibilityInspector.isLivePlayerIndicator("com.google.android.youtube:id/live_chat_container", "", ""))
+        assertTrue(com.example.blocker.YouTubeAccessibilityInspector.isLivePlayerIndicator("", "Top chat", ""))
+        assertTrue(com.example.blocker.YouTubeAccessibilityInspector.isLivePlayerIndicator("", "14K watching now", ""))
+        assertFalse(
+            "Plain Home feed 'Live' filter chip must NOT be misclassified as an active LIVE_PLAYER",
+            com.example.blocker.YouTubeAccessibilityInspector.isLivePlayerIndicator("", "Live", "Live")
+        )
+
+        // 13. Resolver HTML extractor handles YouTube Live externalChannelId payloads
+        assertEquals(
+            "UCYO_jab_esuFRV4b17AJtAw",
+            com.example.data.remote.YouTubeChannelResolver.extractChannelIdFromHtml(
+                """{"videoDetails":{"externalChannelId":"UCYO_jab_esuFRV4b17AJtAw","isLive":true}}"""
+            )
+        )
+    }
+
+    @Test
     fun strictModePolicy_locksContentProtectionChanges() {
         assertTrue(
             StrictModePolicy.canDisableContentProtection("YouTube Study Mode", true) is StrictModePolicy.GuardResult.Denied

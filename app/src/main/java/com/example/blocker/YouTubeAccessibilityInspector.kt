@@ -22,6 +22,8 @@ object YouTubeAccessibilityInspector {
 
     data class YouTubeWindowSnapshot(
         val screenMode: YouTubeStudyEngine.ScreenMode,
+        val activeChannelId: String? = null,
+        val activeVideoId: String? = null,
         val activeChannelTitle: String? = null,
         val activeChannelHandle: String? = null,
         val activeVideoTitle: String? = null,
@@ -29,9 +31,54 @@ object YouTubeAccessibilityInspector {
         val miniPlayerSubtitle: String? = null,
         val miniPlayerBounds: Rect? = null,
         val isSearchResultsScreen: Boolean = false,
+        val isPlaylistScreen: Boolean = false,
+        val isWatchHistoryOrProfileScreen: Boolean = false,
         val activeSearchQuery: String? = null,
-        val allVisibleSnippets: List<String> = emptyList()
+        val allVisibleSnippets: List<String> = emptyList(),
+        val visibleCardSnippets: List<String> = emptyList()
     )
+
+    private val EMBEDDED_YT_URL_REGEX = Regex(
+        pattern = "(?:https?://)?(?:(?:www|m|music)\\.)?(?:youtube\\.com|youtu\\.be|youtube-nocookie\\.com)/[^\\s\"'<>]+",
+        option = RegexOption.IGNORE_CASE
+    )
+    private val CANONICAL_CHANNEL_URL_ID_REGEX = Regex("youtube\\.com/channel/(UC[A-Za-z0-9_-]{22})", RegexOption.IGNORE_CASE)
+
+    /**
+     * Extracts ONLY canonical YouTube video IDs and permanent `UC...` channel IDs from
+     * accessible URLs or canonical metadata strings.
+     * NEVER guesses a channel ID from a display name, video title, or `@handle`.
+     */
+    fun extractCanonicalIdsFromText(raw: String?): Pair<String?, String?> {
+        if (raw.isNullOrBlank()) return null to null
+        val trimmed = raw.trim()
+
+        // Direct exact permanent UC... ID (only when the entire token is a canonical 24-char UC... ID)
+        if (YouTubeStudyEngine.isValidPermanentChannelId(trimmed)) {
+            return null to trimmed
+        }
+
+        var foundVideoId: String? = null
+        var foundChannelId: String? = null
+
+        CANONICAL_CHANNEL_URL_ID_REGEX.find(trimmed)?.groupValues?.getOrNull(1)?.let { cid ->
+            if (YouTubeStudyEngine.isValidPermanentChannelId(cid)) {
+                foundChannelId = cid
+            }
+        }
+
+        EMBEDDED_YT_URL_REGEX.findAll(trimmed).forEach { match ->
+            val parsed = YouTubeStudyEngine.parseYouTubeUrl(match.value) ?: return@forEach
+            if (foundVideoId == null && !parsed.videoId.isNullOrBlank()) {
+                foundVideoId = parsed.videoId
+            }
+            if (foundChannelId == null && !parsed.channelId.isNullOrBlank()) {
+                foundChannelId = parsed.channelId
+            }
+        }
+
+        return foundVideoId to foundChannelId
+    }
 
     // View ID fragments shared across Official YouTube, Morphe YT, and YouTube ReVanced/RVX
     private val SHORTS_ID_TOKENS = listOf(
@@ -59,12 +106,41 @@ object YouTubeAccessibilityInspector {
     private val SEARCH_BAR_ID_TOKENS = listOf(
         "search_edit_text", "search_query", "search_bar_text", "search_box", "toolbar_search"
     )
+    private val LIVE_PLAYER_ID_TOKENS = listOf(
+        "live_chat_container", "live_chat_header", "live_chat_message",
+        "live_chat_text", "time_bar_live", "live_chat_overlay"
+    )
     private val NON_SEARCH_TOP_LABELS = setOf(
         "youtube", "search youtube", "search", "search history", "history", "watch history",
         "subscriptions", "library", "home", "shorts", "you", "profile", "notifications",
         "all", "new to you", "videos", "live", "podcasts", "music", "playlists", "watch later",
         "downloads", "settings", "cast", "morphe", "revanced"
     )
+
+    /**
+     * Pure helper identifying active YouTube Live player / Live Chat UI indicators.
+     * Deliberately excludes the plain "Live" feed filter chip so Home/Search feeds
+     * are NEVER misclassified as an active LIVE_PLAYER.
+     */
+    fun isLivePlayerIndicator(resId: String, text: String, desc: String): Boolean {
+        val r = resId.lowercase()
+        val t = text.trim().lowercase()
+        val d = desc.trim().lowercase()
+        if (LIVE_PLAYER_ID_TOKENS.any { r.contains(it) }) return true
+        if (t == "live chat" || t == "top chat" || t == "chat replay" ||
+            t == "live chat replay" || t == "hide live chat" || t == "show live chat" ||
+            d == "live chat" || d == "top chat" || d == "chat replay" ||
+            d.contains("live chat") || d.contains("top chat") || d.contains("chat replay")
+        ) {
+            return true
+        }
+        if (t.contains("watching now") || d.contains("watching now") ||
+            t.contains("started streaming") || d.contains("started streaming")
+        ) {
+            return true
+        }
+        return false
+    }
 
     fun inspect(
         root: AccessibilityNodeInfo?,
@@ -80,6 +156,9 @@ object YouTubeAccessibilityInspector {
         var hasWatchPlayer = false
         var hasMiniPlayer = false
         var hasLiveBadge = false
+        var hasLivePlayerControl = false
+        var activeChannelId: String? = null
+        var activeVideoId: String? = null
         var activeChannelTitle: String? = null
         var activeChannelHandle: String? = null
         var activeVideoTitle: String? = null
@@ -88,7 +167,10 @@ object YouTubeAccessibilityInspector {
         var activeSearchQuery: String? = null
         var hasTopSearchActionIndicator = false
         var topToolbarQueryCandidate: String? = null
-        val snippets = ArrayList<String>(40)
+        var hasPlaylistIndicator = false
+        var hasWatchHistoryOrProfileIndicator = false
+        val snippets = ArrayList<String>(48)
+        val visibleCardSnippets = ArrayList<String>(32)
 
         val queue = ArrayDeque<Pair<AccessibilityNodeInfo, Int>>()
         queue.add(root to 0)
@@ -99,20 +181,95 @@ object YouTubeAccessibilityInspector {
         val miniPlayerMinY = (screenHeight * 0.58f).toInt()
         val miniPlayerMaxY = (screenHeight * 0.99f).toInt()
         val searchTopBarMaxY = (screenHeight * 0.16f).toInt()
+        val bottomDockMinY = (screenHeight * 0.86f).toInt()
+        val cardMinWidth = (screenWidth * 0.24f).toInt()
+        val cardMinHeight = (screenHeight * 0.05f).toInt()
+        val cardMaxHeight = (screenHeight * 0.55f).toInt()
 
-        while (queue.isNotEmpty() && visited < 160) {
+        while (queue.isNotEmpty() && visited < 210) {
             val (node, depth) = queue.removeFirst()
             visited++
 
             val resId = node.viewIdResourceName?.lowercase().orEmpty()
+            val cls = node.className?.toString().orEmpty()
             val text = node.text?.toString()?.trim().orEmpty()
             val desc = node.contentDescription?.toString()?.trim().orEmpty()
             val lowerDesc = desc.lowercase()
             val lowerText = text.lowercase()
 
-            if (snippets.size < 40) {
-                if (text.length in 2..150) snippets.add(text)
-                else if (desc.length in 2..150) snippets.add(desc)
+            if (snippets.size < 48) {
+                if (text.length in 2..180) snippets.add(text)
+                if (snippets.size < 48 && desc.length in 2..180 && !desc.equals(text, ignoreCase = true)) {
+                    snippets.add(desc)
+                }
+            }
+
+            // Detect Watch History / Library / You / Profile screens explicitly so Morphe YT
+            // Watch History or custom default profile tabs NEVER fire Back!
+            if (!hasWatchHistoryOrProfileIndicator) {
+                val isHistoryOrProfileLabel = lowerText == "history" ||
+                    lowerText == "watch history" ||
+                    lowerText == "library" ||
+                    lowerText == "watch later" ||
+                    lowerText == "downloads" ||
+                    lowerDesc == "history" ||
+                    lowerDesc == "watch history"
+                val isSelectedProfileTab = node.isSelected && (
+                    lowerText == "you" || lowerText == "library" || lowerText == "history" ||
+                        lowerDesc == "you" || lowerDesc.startsWith("you,") ||
+                        lowerDesc == "library" || lowerDesc.startsWith("library,") ||
+                        lowerDesc == "history" || lowerDesc.startsWith("history,")
+                    )
+                if (isSelectedProfileTab) {
+                    hasWatchHistoryOrProfileIndicator = true
+                } else if (isHistoryOrProfileLabel) {
+                    node.getBoundsInScreen(bounds)
+                    if (bounds.top < (screenHeight * 0.22f).toInt()) {
+                        hasWatchHistoryOrProfileIndicator = true
+                    }
+                }
+            }
+
+            // Detect Playlist screens (e.g., "Nude Art" playlist with Play all / Shuffle controls)
+            if (!hasPlaylistIndicator) {
+                val isPlaylistCue = resId.contains("playlist_header") ||
+                    resId.contains("playlist_info") ||
+                    lowerText == "play all" ||
+                    lowerDesc == "play all" ||
+                    lowerDesc.contains("save playlist") ||
+                    lowerDesc.contains("playlist,") ||
+                    lowerText.startsWith("playlist ·") ||
+                    lowerText.startsWith("mix -")
+                if (isPlaylistCue) {
+                    node.getBoundsInScreen(bounds)
+                    if (bounds.top < (screenHeight * 0.62f).toInt()) {
+                        hasPlaylistIndicator = true
+                    }
+                }
+            }
+
+            // Harvest visible feed / search / playlist / recommendation card labels & thumbnail descriptions
+            if (visibleCardSnippets.size < 32 && depth in 2..10 && (node.isClickable || cls.contains("Image", true))) {
+                val hasCardLabel = (desc.length in 6..220 && !lowerDesc.startsWith("go to channel")) ||
+                    (text.length in 6..220 && lowerText !in NON_SEARCH_TOP_LABELS)
+                if (hasCardLabel) {
+                    node.getBoundsInScreen(bounds)
+                    if (bounds.top >= searchTopBarMaxY &&
+                        bounds.bottom <= bottomDockMinY &&
+                        bounds.width() >= cardMinWidth &&
+                        bounds.height() in cardMinHeight..cardMaxHeight
+                    ) {
+                        if (text.length in 6..220 && lowerText !in NON_SEARCH_TOP_LABELS) {
+                            visibleCardSnippets.add(text)
+                        }
+                        if (visibleCardSnippets.size < 32 &&
+                            desc.length in 6..220 &&
+                            !desc.equals(text, ignoreCase = true)
+                        ) {
+                            visibleCardSnippets.add(desc)
+                        }
+                    }
+                }
             }
 
             // 0. Detect active YouTube Search Results bar (strictly distinct from Watch History / Profile!)
@@ -202,6 +359,42 @@ object YouTubeAccessibilityInspector {
                 }
             }
 
+            // Signal 2c: Fast swipe-down BEFORE video buffering finishes!
+            // While buffering in the collapsed bottom miniplayer, YouTube / Morphe YT renders
+            // a Close ("×") icon or loading ProgressBar/timebar in the bottom strip directly above
+            // the navigation dock BEFORE "Pause video" / "Play video" even appears.
+            if (!hasMiniPlayer) {
+                val isMiniCloseCandidate = lowerDesc == "close" ||
+                    lowerDesc == "dismiss" ||
+                    resId.endsWith(":id/close_button") ||
+                    resId.contains("miniplayer_close") ||
+                    resId.contains("floaty_close")
+                val isMiniBufferingSpinner = cls.contains("ProgressBar", ignoreCase = true) ||
+                    resId.contains("player_loading") ||
+                    resId.contains("miniplayer_progress") ||
+                    resId.contains("watch_while_time_bar")
+                if (isMiniCloseCandidate || isMiniBufferingSpinner) {
+                    node.getBoundsInScreen(bounds)
+                    val inMiniStripY = bounds.top >= (screenHeight * 0.70f).toInt() &&
+                        bounds.bottom <= (screenHeight * 0.94f).toInt()
+                    val validCloseShape = isMiniCloseCandidate &&
+                        bounds.left >= (screenWidth * 0.72f).toInt() &&
+                        bounds.width() in 16..(screenWidth * 0.25f).toInt() &&
+                        bounds.height() in 16..(screenHeight * 0.14f).toInt()
+                    val validSpinnerShape = isMiniBufferingSpinner &&
+                        bounds.height() in 3..(screenHeight * 0.12f).toInt()
+                    if (inMiniStripY && (validCloseShape || validSpinnerShape)) {
+                        hasMiniPlayer = true
+                        if (miniPlayerBounds == null) {
+                            miniPlayerBounds = Rect(0, bounds.top, screenWidth, bounds.bottom)
+                        }
+                        if (miniPlayerSubtitle == null) {
+                            extractMiniPlayerChannelText(node.parent ?: node)?.let { miniPlayerSubtitle = it }
+                        }
+                    }
+                }
+            }
+
             if (!hasWatchPlayer && WATCH_PLAYER_ID_TOKENS.any { resId.contains(it) }) {
                 node.getBoundsInScreen(bounds)
                 if (bounds.height() > (screenHeight * 0.18f).toInt()) {
@@ -217,8 +410,16 @@ object YouTubeAccessibilityInspector {
                 }
             }
 
-            // 3. Detect Live badge on active player
+            // 3. Detect Live badge and active Live player / Live Chat controls
+            if (!hasLivePlayerControl && isLivePlayerIndicator(resId, text, desc)) {
+                node.getBoundsInScreen(bounds)
+                if (bounds.top < (screenHeight * 0.85f).toInt()) {
+                    hasLivePlayerControl = true
+                    hasLiveBadge = true
+                }
+            }
             if (!hasLiveBadge && (text.equals("LIVE", ignoreCase = true) ||
+                    resId.contains("live_badge") ||
                     desc.contains("watching now", ignoreCase = true) ||
                     desc.contains("live chat", ignoreCase = true))
             ) {
@@ -228,7 +429,26 @@ object YouTubeAccessibilityInspector {
                 }
             }
 
-            // 4. Extract active channel handle / title from watch or Shorts header
+            // 4. Extract canonical videoId / UC... channelId from accessible URLs (if exposed)
+            //    and observational handle / title from watch or Shorts header.
+            if (activeVideoId == null || activeChannelId == null) {
+                val (vidFromText, cidFromText) = extractCanonicalIdsFromText(text)
+                val (vidFromDesc, cidFromDesc) = if (vidFromText == null || cidFromText == null) {
+                    extractCanonicalIdsFromText(desc)
+                } else {
+                    null to null
+                }
+                val candidateVid = vidFromText ?: vidFromDesc
+                val candidateCid = cidFromText ?: cidFromDesc
+                if (candidateVid != null || candidateCid != null) {
+                    node.getBoundsInScreen(bounds)
+                    if (bounds.top < watchHeaderMaxY || hasShortsContainer || hasWatchPlayer) {
+                        if (activeVideoId == null && candidateVid != null) activeVideoId = candidateVid
+                        if (activeChannelId == null && candidateCid != null) activeChannelId = candidateCid
+                    }
+                }
+            }
+
             if (activeChannelHandle == null) {
                 val h = YouTubeStudyEngine.normalizeHandle(text).ifEmpty {
                     YouTubeStudyEngine.normalizeHandle(desc)
@@ -262,8 +482,8 @@ object YouTubeAccessibilityInspector {
                 }
             }
 
-            if (depth < 9) {
-                val count = node.childCount.coerceAtMost(10)
+            if (depth < 11) {
+                val count = node.childCount.coerceAtMost(12)
                 for (i in 0 until count) {
                     node.getChild(i)?.let { queue.add(it to depth + 1) }
                 }
@@ -275,39 +495,53 @@ object YouTubeAccessibilityInspector {
         // "Pause video" alone (which also appears on the bottom miniplayer bar and would misclassify
         // Home/History + miniplayer as WATCH_PLAYER, causing Back to exit Morphe YT!).
         if (!hasWatchPlayer && !hasShortsContainer && !hasMiniPlayer && client.family != YouTubeClientFamily.THIRD_PARTY) {
-            val hasExclusiveWatchControl = snippets.any { s ->
+            val hasExclusiveWatchControl = hasLivePlayerControl || snippets.any { s ->
                 s.startsWith("Comments", ignoreCase = true) ||
                     s.contains("Enter fullscreen", ignoreCase = true) ||
                     s.contains("Exit fullscreen", ignoreCase = true) ||
-                    s.equals("Minimize", ignoreCase = true)
+                    s.equals("Minimize", ignoreCase = true) ||
+                    isLivePlayerIndicator("", s, s)
             }
             val hasSubscribeAndActionRow = snippets.any { s ->
-                s.equals("Subscribe", ignoreCase = true) || s.equals("Subscribed", ignoreCase = true)
+                s.equals("Subscribe", ignoreCase = true) ||
+                    s.equals("Subscribed", ignoreCase = true) ||
+                    s.equals("Join", ignoreCase = true)
             } && snippets.any { s ->
                 s.equals("Share", ignoreCase = true) ||
                     s.equals("Remix", ignoreCase = true) ||
+                    s.equals("Live chat", ignoreCase = true) ||
                     s.contains("like this video", ignoreCase = true) ||
                     s.contains("Dislike this video", ignoreCase = true)
             }
             if (hasExclusiveWatchControl || hasSubscribeAndActionRow) {
                 hasWatchPlayer = true
+                if (hasLivePlayerControl || snippets.any { isLivePlayerIndicator("", it, it) }) {
+                    hasLiveBadge = true
+                }
             }
         }
 
-        // If watch player is open and channel title wasn't matched by viewId, inspect text right before "Subscribe"
+        // If watch/live player is open and channel title wasn't matched by viewId, inspect text
+        // right before "Subscribe" / "Subscribed" / "Join"
         if (hasWatchPlayer && activeChannelTitle == null && activeChannelHandle == null) {
             val subIdx = snippets.indexOfFirst {
-                it.equals("Subscribe", ignoreCase = true) || it.equals("Subscribed", ignoreCase = true)
+                it.equals("Subscribe", ignoreCase = true) ||
+                    it.equals("Subscribed", ignoreCase = true) ||
+                    (hasLiveBadge && it.equals("Join", ignoreCase = true))
             }
             if (subIdx > 0) {
                 for (back in 1..3) {
                     val cand = snippets.getOrNull(subIdx - back)?.trim().orEmpty()
                     if (cand.length in 2..60 &&
                         !cand.contains("views", ignoreCase = true) &&
+                        !cand.contains("watching now", ignoreCase = true) &&
                         !cand.contains("subscribers", ignoreCase = true) &&
+                        !cand.equals("LIVE", ignoreCase = true) &&
                         !cand.equals("Share", ignoreCase = true) &&
                         !cand.equals("Download", ignoreCase = true) &&
-                        !cand.equals("Save", ignoreCase = true)
+                        !cand.equals("Save", ignoreCase = true) &&
+                        !cand.equals("Live chat", ignoreCase = true) &&
+                        !cand.equals("Top chat", ignoreCase = true)
                     ) {
                         activeChannelTitle = cand
                         break
@@ -320,6 +554,10 @@ object YouTubeAccessibilityInspector {
         val isSearchResultsScreen = !hasWatchPlayer && !hasShortsContainer && !hasMiniPlayer &&
             !resolvedSearchQuery.isNullOrBlank() &&
             (activeSearchQuery != null || hasTopSearchActionIndicator)
+        val isWatchHistoryOrProfileScreen = !hasWatchPlayer && !hasShortsContainer && !hasMiniPlayer &&
+            !isSearchResultsScreen && hasWatchHistoryOrProfileIndicator
+        val isPlaylistScreen = !hasWatchPlayer && !hasShortsContainer && !hasMiniPlayer &&
+            !isSearchResultsScreen && !isWatchHistoryOrProfileScreen && hasPlaylistIndicator
 
         val resolvedChannelTitle = activeChannelTitle ?: if (!hasWatchPlayer && hasMiniPlayer) miniPlayerSubtitle else null
 
@@ -331,8 +569,21 @@ object YouTubeAccessibilityInspector {
             else -> YouTubeStudyEngine.ScreenMode.FEED_OR_SEARCH
         }
 
+        val dedupedSnippets = BrowserUrlExtractor.mergeAndDeduplicateEvidence(
+            pageSnippets = snippets,
+            cardSnippets = emptyList(),
+            maxTotal = 48
+        )
+        val dedupedCards = BrowserUrlExtractor.mergeAndDeduplicateEvidence(
+            pageSnippets = visibleCardSnippets,
+            cardSnippets = emptyList(),
+            maxTotal = 32
+        )
+
         return YouTubeWindowSnapshot(
             screenMode = screenMode,
+            activeChannelId = activeChannelId,
+            activeVideoId = activeVideoId,
             activeChannelTitle = resolvedChannelTitle,
             activeChannelHandle = activeChannelHandle,
             activeVideoTitle = activeVideoTitle,
@@ -340,8 +591,11 @@ object YouTubeAccessibilityInspector {
             miniPlayerSubtitle = miniPlayerSubtitle,
             miniPlayerBounds = miniPlayerBounds,
             isSearchResultsScreen = isSearchResultsScreen,
+            isPlaylistScreen = isPlaylistScreen,
+            isWatchHistoryOrProfileScreen = isWatchHistoryOrProfileScreen,
             activeSearchQuery = resolvedSearchQuery,
-            allVisibleSnippets = snippets
+            allVisibleSnippets = dedupedSnippets,
+            visibleCardSnippets = dedupedCards
         )
     }
 
@@ -407,6 +661,26 @@ object YouTubeAccessibilityInspector {
                     bounds.left >= (screenWidth * 0.45f).toInt() &&
                     bounds.height() in 16..(screenHeight * 0.14f).toInt()
                 ) {
+                    playControlBandBounds = Rect(0, bounds.top, screenWidth, bounds.bottom)
+                }
+            }
+
+            // Buffering / loading miniplayer strip fallback (fast swipe-down before playback loads)
+            val cls = node.className?.toString().orEmpty()
+            val isLoadingMiniStrip = desc == "close" || desc == "dismiss" ||
+                cls.contains("ProgressBar", ignoreCase = true) ||
+                resId.contains("watch_while_time_bar")
+            if (playControlBandBounds == null && isLoadingMiniStrip) {
+                node.getBoundsInScreen(bounds)
+                val inStripY = bounds.top >= (screenHeight * 0.70f).toInt() &&
+                    bounds.bottom <= (screenHeight * 0.94f).toInt()
+                val validRightClose = (desc == "close" || desc == "dismiss") &&
+                    bounds.left >= (screenWidth * 0.72f).toInt() &&
+                    bounds.height() in 16..(screenHeight * 0.14f).toInt()
+                val validProgress = !validRightClose &&
+                    (cls.contains("ProgressBar", true) || resId.contains("watch_while_time_bar")) &&
+                    bounds.height() in 3..(screenHeight * 0.12f).toInt()
+                if (inStripY && (validRightClose || validProgress)) {
                     playControlBandBounds = Rect(0, bounds.top, screenWidth, bounds.bottom)
                 }
             }
@@ -503,16 +777,17 @@ object YouTubeAccessibilityInspector {
                 }
             }
 
-            // Track Play/Pause button in the bottom miniplayer band so we can click its right-hand sibling (×)
-            if (miniPlayButtonNode == null && (
-                    desc == "pause video" || desc == "play video" || desc == "replay video" ||
-                        desc == "pause" || desc == "play" || resId.contains("miniplayer_play")
-                    )
-            ) {
+            // Track Play/Pause or buffering ProgressBar in the bottom miniplayer band so we can click its right-hand sibling (×)
+            val cls = node.className?.toString().orEmpty()
+            val isMiniPlayOrBuffering = desc == "pause video" || desc == "play video" || desc == "replay video" ||
+                desc == "pause" || desc == "play" || resId.contains("miniplayer_play") ||
+                cls.contains("ProgressBar", ignoreCase = true)
+            if (miniPlayButtonNode == null && isMiniPlayOrBuffering) {
                 node.getBoundsInScreen(bounds)
+                val validMinLeft = if (cls.contains("ProgressBar", true)) (screenWidth * 0.35f).toInt() else (screenWidth * 0.45f).toInt()
                 if (bounds.top >= miniBarTopMin && bounds.bottom <= miniBarBottomMax &&
-                    bounds.left >= (screenWidth * 0.45f).toInt() &&
-                    bounds.height() in 16..(screenHeight * 0.14f).toInt()
+                    bounds.left >= validMinLeft &&
+                    bounds.height() in 12..(screenHeight * 0.14f).toInt()
                 ) {
                     miniPlayButtonNode = node
                     miniPlayBounds.set(bounds)

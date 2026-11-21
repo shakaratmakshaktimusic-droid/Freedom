@@ -217,7 +217,7 @@ fun YouTubeStudyManagerView(
                     GlassDivider()
                     StudyToggleRow(
                         title = "Allow Live streams from approved channels",
-                        subtitle = "Blocked by default. When enabled, only live streams from approved channels can play.",
+                        subtitle = "Allowed by default for verified approved channels. Unapproved and unknown live streams remain blocked.",
                         checked = cfg.youtubeAllowLiveFromApproved,
                         onCheckedChange = onToggleAllowLive,
                         testTag = "yt_allow_live_switch"

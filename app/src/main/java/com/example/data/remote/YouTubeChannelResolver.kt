@@ -210,10 +210,17 @@ class YouTubeChannelResolver(
             }
         }
 
-        // 2. Primary backup: Public watch page HTML -> channelId extraction -> verify channel
+        // 2. Primary backup: Public watch page HTML (and /live/ fallback for Live broadcasts)
         val watchHtmlRes = httpGet(watchUrl)
         if (watchHtmlRes.isSuccess) {
             val extractedCid = extractChannelIdFromHtml(watchHtmlRes.body.orEmpty())
+            if (extractedCid != null) {
+                return@withContext verifyByPermanentChannelId(extractedCid, optionalApiKey)
+            }
+        }
+        val liveHtmlRes = httpGet("https://www.youtube.com/live/$vid")
+        if (liveHtmlRes.isSuccess) {
+            val extractedCid = extractChannelIdFromHtml(liveHtmlRes.body.orEmpty())
             if (extractedCid != null) {
                 return@withContext verifyByPermanentChannelId(extractedCid, optionalApiKey)
             }
@@ -570,7 +577,7 @@ class YouTubeChannelResolver(
     }
 
     companion object {
-        private val EXTERNAL_ID_REGEX = Regex("\"(?:externalId|channelId|browseId)\"\\s*:\\s*\"(UC[A-Za-z0-9_-]{22})\"")
+        private val EXTERNAL_ID_REGEX = Regex("\"(?:externalId|externalChannelId|channelId|browseId)\"\\s*:\\s*\"(UC[A-Za-z0-9_-]{22})\"")
         private val CANONICAL_LINK_REGEX = Regex("https?://www\\.youtube\\.com/channel/(UC[A-Za-z0-9_-]{22})")
         private val OG_TITLE_REGEX = Regex("<meta\\s+property=\"og:title\"\\s+content=\"([^\"]+)\"")
         private val OG_IMAGE_REGEX = Regex("<meta\\s+property=\"og:image\"\\s+content=\"([^\"]+)\"")

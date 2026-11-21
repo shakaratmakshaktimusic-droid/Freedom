@@ -17,6 +17,7 @@ import android.os.Looper
 import android.os.SystemClock
 import android.provider.Browser
 import android.view.KeyEvent
+import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
@@ -29,6 +30,7 @@ import com.example.domain.MatureMediaCatalog
 import com.example.domain.SafeSearchEngine
 import com.example.domain.UnknownSiteClassifier
 import com.example.domain.WebsiteCategory
+import com.example.domain.YouTubeChannelVerificationTracker
 import com.example.domain.YouTubeClientRegistry
 import com.example.domain.YouTubeStudyEngine
 import java.util.concurrent.ConcurrentHashMap
@@ -40,6 +42,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Pure zero-VPN real-time blocking engine powered by Android AccessibilityService.
@@ -80,12 +83,27 @@ class FreedomAccessibilityService : AccessibilityService() {
     @Volatile
     private var lastClassifiedUrlKey: String = ""
 
+    @Volatile
+    private var lastClassifiedEvidenceCount: Int = 0
+
+    @Volatile
+    private var lastClassifiedAttempts: Int = 0
+
+    @Volatile
+    private var lastMiniRecheckScheduledAtMs: Long = 0L
+
     // Per-(browserPkg, providerId, normalizedQuery) 10-minute dedup map so SafeSearch NEVER
     // reload-loops or spams new tabs even when Bing/Brave/Google strip URL params after load.
     private val recentEnforcedSafeSearchQueries = ConcurrentHashMap<String, Long>()
 
     @Volatile
     private var lastApprovedYouTubePkg: String = ""
+
+    @Volatile
+    private var lastApprovedYouTubeSessionKey: String = ""
+
+    @Volatile
+    private var lastApprovedYouTubeWasLive: Boolean = false
 
     @Volatile
     private var lastApprovedYouTubeTimeMs: Long = 0L
@@ -115,7 +133,7 @@ class FreedomAccessibilityService : AccessibilityService() {
     @Volatile
     private var lastEvictionTimeMs: Long = 0L
 
-    private val inFlightVideoLookups = ConcurrentHashMap.newKeySet<String>()
+    private val ytVerificationTracker = YouTubeChannelVerificationTracker()
 
     @Volatile
     private var persistentFloatingShieldActive: Boolean = false
@@ -180,9 +198,7 @@ class FreedomAccessibilityService : AccessibilityService() {
         val isSessionActive = snapshot.isStillActive(nowWall, nowElapsed)
         val isStrictActive = isSessionActive && snapshot.strictMode
 
-        val displayMetrics = resources.displayMetrics
-        val screenWidth = displayMetrics.widthPixels
-        val screenHeight = displayMetrics.heightPixels
+        val (screenWidth, screenHeight) = getActualDisplayDimensions()
 
         val allWindows = runCatching { windows }.getOrNull().orEmpty()
 
@@ -318,27 +334,48 @@ class FreedomAccessibilityService : AccessibilityService() {
                     !DomainBlockMatcher.isAllowedByWebsiteAllowlist(host, fullUrl, snapshot.allowedWebPatterns)
                 ) {
                     val urlKey = "${host}:${fullUrl?.hashCode()}"
-                    if (urlKey != lastClassifiedUrlKey) {
-                        lastClassifiedUrlKey = urlKey
-                        val snippets = BrowserUrlExtractor.collectBoundedPageSnippets(root, maxSnippets = 40)
-                        val match = UnknownSiteClassifier.classify(
-                            host = host,
-                            fullUrl = fullUrl ?: host,
-                            visibleTextSnippets = snippets,
-                            activeCategories = snapshot.blockedWebCategories
-                        )
-                        if (match != null) {
-                            val hash64 = DomainBlockMatcher.fnv1a64(match.normalizedHost)
-                            container.domainIndex.addAutoLearnedHash(match.category, hash64)
-                            serviceScope.launch {
-                                container.repository.recordAutoLearnedDomainHash(hash64, match.category)
-                            }
-                            val pkg = root.packageName?.toString() ?: triggerPackage.orEmpty()
-                            decision = BlockDecisionEngine.Decision.BlockWebsite(
-                                packageName = pkg,
-                                categoryTitle = "${match.category.title} (Auto-Detected)",
-                                isMultiWindowOrPip = hasSplitDivider
+                    val isNewUrl = urlKey != lastClassifiedUrlKey
+                    val shouldCheckDelayedDom = !isNewUrl &&
+                        lastClassifiedAttempts < 2 &&
+                        lastClassifiedEvidenceCount < 6
+                    if (isNewUrl || shouldCheckDelayedDom) {
+                        val evidence = BrowserUrlExtractor.collectCombinedContentEvidence(
+                            root = root,
+                            displayWidth = screenWidth,
+                            displayHeight = screenHeight,
+                            maxPageSnippets = 40,
+                            maxCards = 14,
+                            maxTotalEvidence = 56
+                        ).mergedEvidence
+                        if (shouldEvaluateUnknownSiteClassification(
+                                isNewUrl = isNewUrl,
+                                lastEvidenceCount = lastClassifiedEvidenceCount,
+                                lastAttempts = lastClassifiedAttempts,
+                                currentEvidenceCount = evidence.size
                             )
+                        ) {
+                            lastClassifiedUrlKey = urlKey
+                            lastClassifiedEvidenceCount = evidence.size
+                            lastClassifiedAttempts = if (isNewUrl) 1 else (lastClassifiedAttempts + 1)
+                            val match = UnknownSiteClassifier.classify(
+                                host = host,
+                                fullUrl = fullUrl ?: host,
+                                visibleTextSnippets = evidence,
+                                activeCategories = snapshot.blockedWebCategories
+                            )
+                            if (match != null) {
+                                val hash64 = DomainBlockMatcher.fnv1a64(match.normalizedHost)
+                                container.domainIndex.addAutoLearnedHash(match.category, hash64)
+                                serviceScope.launch {
+                                    container.repository.recordAutoLearnedDomainHash(hash64, match.category)
+                                }
+                                val pkg = root.packageName?.toString() ?: triggerPackage.orEmpty()
+                                decision = BlockDecisionEngine.Decision.BlockWebsite(
+                                    packageName = pkg,
+                                    categoryTitle = "${match.category.title} (Auto-Detected)",
+                                    isMultiWindowOrPip = hasSplitDivider
+                                )
+                            }
                         }
                     }
                 }
@@ -965,20 +1002,31 @@ class FreedomAccessibilityService : AccessibilityService() {
             // -----------------------------------------------------------------
             val ytClient = YouTubeClientRegistry.identifyClient(pkg, appLabel)
             if (ytClient != null) {
-                // A0. PiP Leak Safety Guard: if a YouTube client is floating in PiP while Study Mode
-                // is ON and the current video was NOT verified as an approved channel, close PiP & pause!
-                if (win.isPip && contentConfig.youtubeStudyModeEnabled && !isRecentApprovedYouTubeWatch(pkg)) {
-                    stopBackgroundYouTubePlayback(pkg, sessionId, notify = false)
-                    closeYouTubePipWindow(
-                        pkg = pkg,
-                        targetRoot = root,
-                        targetBounds = win.bounds,
-                        allWindows = allWindows,
-                        screenWidth = screenWidth,
-                        screenHeight = screenHeight,
-                        sessionId = sessionId
-                    )
-                    return
+                // A0. Android System PiP Mode (strictly distinct from YouTube's in-app bottom miniplayer!):
+                //  - Android PiP (`win.isPip`) floats outside YouTube over Home/other apps and exposes
+                //    NO channel header nodes.
+                //  - Unapproved / unknown PiP (or Live PiP when user explicitly disabled Live) -> close PiP & pause!
+                //  - Verified approved VOD or Live stream in Android PiP -> refresh session timestamp and
+                //    continue WITHOUT running full in-app Watch inspection against the headerless PiP window!
+                if (win.isPip) {
+                    if (contentConfig.youtubeStudyModeEnabled) {
+                        val pipLiveDisallowed = lastApprovedYouTubeWasLive && !contentConfig.youtubeAllowLiveFromApproved
+                        if (!isRecentApprovedYouTubeWatch(pkg) || pipLiveDisallowed) {
+                            stopBackgroundYouTubePlayback(pkg, sessionId, notify = false)
+                            closeYouTubePipWindow(
+                                pkg = pkg,
+                                targetRoot = root,
+                                targetBounds = win.bounds,
+                                allWindows = allWindows,
+                                screenWidth = screenWidth,
+                                screenHeight = screenHeight,
+                                sessionId = sessionId
+                            )
+                            return
+                        }
+                        lastApprovedYouTubeTimeMs = SystemClock.elapsedRealtime()
+                    }
+                    continue
                 }
 
                 val ytSnapshot = YouTubeAccessibilityInspector.inspect(
@@ -1013,68 +1061,172 @@ class FreedomAccessibilityService : AccessibilityService() {
                         ytSnapshot.screenMode == YouTubeStudyEngine.ScreenMode.SHORTS_PLAYER ||
                         ytSnapshot.screenMode == YouTubeStudyEngine.ScreenMode.MINI_PLAYER
 
-                    // Track unverified player entry immediately so fast click -> Home cannot play in background!
-                    if (isPlayerScreen) {
-                        val matchedApproved = approved.matchesAttribution(
-                            channelId = null,
-                            handle = ytSnapshot.activeChannelHandle,
-                            channelTitle = ytSnapshot.activeChannelTitle
+                    val nowElapsedMs = SystemClock.elapsedRealtime()
+                    val resolution = if (isPlayerScreen) {
+                        ytVerificationTracker.evaluateCurrentPlayback(
+                            activeVideoId = ytSnapshot.activeVideoId,
+                            extractedChannelId = ytSnapshot.activeChannelId,
+                            observedHandle = ytSnapshot.activeChannelHandle,
+                            observedDisplayTitle = ytSnapshot.activeChannelTitle,
+                            observedVideoTitle = ytSnapshot.activeVideoTitle,
+                            persistedVideoToChannelMap = approved.videoToChannelIdCache,
+                            nowMs = nowElapsedMs
                         )
-                        if (matchedApproved) {
-                            isApprovedYouTubeChannel = true
-                            lastApprovedYouTubePkg = pkg
-                            lastApprovedYouTubeTimeMs = SystemClock.elapsedRealtime()
-                            if (lastUnverifiedYouTubePkg == pkg) lastUnverifiedYouTubePkg = ""
-                        } else if (!(ytSnapshot.screenMode == YouTubeStudyEngine.ScreenMode.MINI_PLAYER && isRecentApprovedYouTubeWatch(pkg))) {
-                            // Clear stale approval as soon as user opens a new unverified video
-                            if (ytSnapshot.screenMode != YouTubeStudyEngine.ScreenMode.MINI_PLAYER && lastApprovedYouTubePkg == pkg) {
-                                lastApprovedYouTubePkg = ""
-                            }
-                            lastUnverifiedYouTubePkg = pkg
-                            lastUnverifiedYouTubeTimeMs = SystemClock.elapsedRealtime()
-                        }
+                    } else {
+                        ytVerificationTracker.clearActiveSession()
+                        null
                     }
+
+                    // If the user switched to a different video, IMMEDIATELY invalidate prior approval
+                    // so the previous video's identity NEVER carries over to the new video!
+                    if (resolution != null && resolution.videoSwitched &&
+                        ytSnapshot.screenMode != YouTubeStudyEngine.ScreenMode.MINI_PLAYER &&
+                        lastApprovedYouTubePkg == pkg
+                    ) {
+                        lastApprovedYouTubePkg = ""
+                        lastApprovedYouTubeSessionKey = ""
+                        lastApprovedYouTubeWasLive = false
+                    }
+
+                    // Kick off at most ONE non-blocking IO lookup if a canonical videoId needs verification
+                    resolution?.shouldStartAsyncLookupForVideoId?.let { vidToVerify ->
+                        launchVideoChannelVerification(vidToVerify)
+                    }
+
+                    val currentAttribution = resolution?.attribution
+                    val sameApprovedSession = isRecentApprovedYouTubeWatch(pkg) &&
+                        (resolution?.sessionKey == null ||
+                            lastApprovedYouTubeSessionKey.isEmpty() ||
+                            resolution.sessionKey == lastApprovedYouTubeSessionKey)
 
                     val playbackDecision = YouTubeStudyEngine.evaluateActivePlayback(
                         screenMode = ytSnapshot.screenMode,
-                        detectedChannelId = null,
+                        detectedChannelId = currentAttribution?.verifiedChannelId,
                         detectedHandle = ytSnapshot.activeChannelHandle,
                         detectedChannelTitle = ytSnapshot.activeChannelTitle,
                         approved = approved,
                         config = contentConfig,
                         strictMode = strictMode,
-                        lastApprovedWatchActive = isRecentApprovedYouTubeWatch(pkg)
+                        lastApprovedWatchActive = sameApprovedSession,
+                        attribution = currentAttribution
                     )
 
-                    if (playbackDecision is YouTubeStudyEngine.StudyDecision.BlockPlayback) {
-                        if (lastApprovedYouTubePkg == pkg) {
-                            lastApprovedYouTubePkg = ""
+                    // Update approved vs unverified tracking strictly from verified/honest decision
+                    if (isPlayerScreen) {
+                        val confirmedApproved = playbackDecision is YouTubeStudyEngine.StudyDecision.Allow &&
+                            (currentAttribution?.status == YouTubeStudyEngine.ChannelAttributionStatus.VERIFIED ||
+                                (currentAttribution?.videoId == null && approved.matchesAttribution(
+                                    channelId = currentAttribution?.verifiedChannelId,
+                                    handle = ytSnapshot.activeChannelHandle,
+                                    channelTitle = ytSnapshot.activeChannelTitle
+                                )))
+                        val continuedApprovedSession = playbackDecision is YouTubeStudyEngine.StudyDecision.Allow &&
+                            sameApprovedSession &&
+                            (ytSnapshot.screenMode == YouTubeStudyEngine.ScreenMode.MINI_PLAYER ||
+                                ytSnapshot.screenMode == YouTubeStudyEngine.ScreenMode.LIVE_PLAYER)
+                        if (confirmedApproved) {
+                            isApprovedYouTubeChannel = true
+                            lastApprovedYouTubePkg = pkg
+                            lastApprovedYouTubeSessionKey = resolution?.sessionKey.orEmpty()
+                            lastApprovedYouTubeWasLive = ytSnapshot.screenMode == YouTubeStudyEngine.ScreenMode.LIVE_PLAYER
+                            lastApprovedYouTubeTimeMs = nowElapsedMs
+                            if (lastUnverifiedYouTubePkg == pkg) lastUnverifiedYouTubePkg = ""
+                        } else if (continuedApprovedSession) {
+                            isApprovedYouTubeChannel = true
+                            lastApprovedYouTubeTimeMs = nowElapsedMs
+                            if (lastUnverifiedYouTubePkg == pkg) lastUnverifiedYouTubePkg = ""
+                        } else {
+                            if (ytSnapshot.screenMode != YouTubeStudyEngine.ScreenMode.MINI_PLAYER && lastApprovedYouTubePkg == pkg) {
+                                lastApprovedYouTubePkg = ""
+                                lastApprovedYouTubeSessionKey = ""
+                                lastApprovedYouTubeWasLive = false
+                            }
+                            lastUnverifiedYouTubePkg = pkg
+                            lastUnverifiedYouTubeTimeMs = nowElapsedMs
                         }
-                        enforceYouTubeInAppVideoCut(
-                            blockedPackage = pkg,
-                            root = root,
-                            cutAction = playbackDecision.cutAction,
-                            reason = playbackDecision.reason,
-                            notificationText = playbackDecision.notificationText,
-                            sessionId = sessionId,
-                            screenWidth = screenWidth,
-                            screenHeight = screenHeight,
-                            miniPlayerBounds = ytSnapshot.miniPlayerBounds
-                        )
-                        return
+                    }
+
+                    when (playbackDecision) {
+                        is YouTubeStudyEngine.StudyDecision.BlockPlayback -> {
+                            if (lastApprovedYouTubePkg == pkg) {
+                                lastApprovedYouTubePkg = ""
+                                lastApprovedYouTubeSessionKey = ""
+                                lastApprovedYouTubeWasLive = false
+                            }
+                            enforceYouTubeInAppVideoCut(
+                                blockedPackage = pkg,
+                                root = root,
+                                cutAction = playbackDecision.cutAction,
+                                reason = playbackDecision.reason,
+                                notificationText = playbackDecision.notificationText,
+                                sessionId = sessionId,
+                                screenWidth = screenWidth,
+                                screenHeight = screenHeight,
+                                miniPlayerBounds = ytSnapshot.miniPlayerBounds
+                            )
+                            return
+                        }
+
+                        is YouTubeStudyEngine.StudyDecision.NeedsVideoChannelVerification -> {
+                            launchVideoChannelVerification(playbackDecision.videoId)
+                            lastUnverifiedYouTubePkg = pkg
+                            lastUnverifiedYouTubeTimeMs = nowElapsedMs
+                        }
+
+                        YouTubeStudyEngine.StudyDecision.Allow -> Unit
+                    }
+
+                    // Fast swipe-down BEFORE buffering finishes guard:
+                    // If user tapped an unverified video and immediately swiped down into the bottom
+                    // miniplayer before its controls finished rendering, check live miniplayer bounds
+                    // right away or run ONE bounded 360ms follow-up re-scan once controls settle.
+                    if (ytSnapshot.screenMode == YouTubeStudyEngine.ScreenMode.FEED_OR_SEARCH &&
+                        lastUnverifiedYouTubePkg == pkg &&
+                        !isRecentApprovedYouTubeWatch(pkg)
+                    ) {
+                        val elapsed = SystemClock.elapsedRealtime() - lastUnverifiedYouTubeTimeMs
+                        if (elapsed in 0L..4_500L) {
+                            val liveMiniBounds = YouTubeAccessibilityInspector.findLiveMiniPlayerBounds(
+                                root = root,
+                                screenWidth = screenWidth,
+                                screenHeight = screenHeight
+                            )
+                            if (liveMiniBounds != null) {
+                                enforceYouTubeInAppVideoCut(
+                                    blockedPackage = pkg,
+                                    root = root,
+                                    cutAction = YouTubeStudyEngine.PlaybackCutAction.CLOSE_MINIPLAYER_ONLY,
+                                    reason = "Fast swipe-down unverified miniplayer stopped",
+                                    notificationText = "Video stopped — channel not in your Study Mode allowlist.",
+                                    sessionId = sessionId,
+                                    screenWidth = screenWidth,
+                                    screenHeight = screenHeight,
+                                    miniPlayerBounds = liveMiniBounds
+                                )
+                                return
+                            }
+                            val nowMs = SystemClock.elapsedRealtime()
+                            if (nowMs - lastMiniRecheckScheduledAtMs > 500L) {
+                                lastMiniRecheckScheduledAtMs = nowMs
+                                mainHandler.postDelayed({ recheckActiveWindowsNow() }, 360L)
+                            }
+                        }
                     }
                 }
 
                 // Silent Always-On Adult / Mature-Media Protection inside YouTube & Morphe YT
-                // (Only cuts ACTIVE playback or an ACTIVE explicit Search Results bar — NEVER fires Back
-                // on Home, Subscriptions, Profile, Library, or Watch History thumbnails!)
+                // (Evaluates active playback, active Search Results + visible result cards/playlists,
+                //  open Playlists, and non-History recommendations — NEVER fires Back on Watch History!)
                 val adultCutAction = YouTubeStudyEngine.evaluateInAppAdultCutAction(
                     screenMode = ytSnapshot.screenMode,
                     activeVideoTitle = ytSnapshot.activeVideoTitle,
                     activeSearchQuery = ytSnapshot.activeSearchQuery,
                     isSearchResultsScreen = ytSnapshot.isSearchResultsScreen,
                     visibleSnippets = ytSnapshot.allVisibleSnippets,
-                    isApprovedYouTubeChannel = isApprovedYouTubeChannel
+                    isApprovedYouTubeChannel = isApprovedYouTubeChannel,
+                    isPlaylistScreen = ytSnapshot.isPlaylistScreen,
+                    isWatchHistoryOrProfileScreen = ytSnapshot.isWatchHistoryOrProfileScreen,
+                    visibleCardSnippets = ytSnapshot.visibleCardSnippets
                 )
                 if (adultCutAction != null) {
                     enforceYouTubeInAppVideoCut(
@@ -1082,7 +1234,7 @@ class FreedomAccessibilityService : AccessibilityService() {
                         root = root,
                         cutAction = adultCutAction,
                         reason = if (adultCutAction == YouTubeStudyEngine.PlaybackCutAction.EXIT_SEARCH_RESULTS) {
-                            "Explicit search filtered in ${ytClient.displayName}"
+                            "Explicit search, playlist, or recommendation filtered in ${ytClient.displayName}"
                         } else {
                             "Inappropriate or mature content filtered in ${ytClient.displayName}"
                         },
@@ -1154,6 +1306,25 @@ class FreedomAccessibilityService : AccessibilityService() {
 
                         is YouTubeStudyEngine.StudyDecision.NeedsVideoChannelVerification -> {
                             val vid = ytUrlDecision.videoId
+                            val urlRes = ytVerificationTracker.evaluateCurrentPlayback(
+                                activeVideoId = vid,
+                                extractedChannelId = null,
+                                observedHandle = null,
+                                observedDisplayTitle = null,
+                                observedVideoTitle = null,
+                                persistedVideoToChannelMap = approved.videoToChannelIdCache,
+                                nowMs = SystemClock.elapsedRealtime()
+                            )
+                            if (urlRes.attribution.status == YouTubeStudyEngine.ChannelAttributionStatus.FAILED) {
+                                enforceContentProtectionEviction(
+                                    blockedPackage = pkg,
+                                    navigateHome = false,
+                                    reason = "YouTube video channel verification failed (${urlRes.attribution.failureReason ?: "unverified"})",
+                                    notificationText = "Video blocked — channel identity could not be verified.",
+                                    sessionId = sessionId
+                                )
+                                return
+                            }
                             if (strictMode) {
                                 enforceContentProtectionEviction(
                                     blockedPackage = pkg,
@@ -1163,18 +1334,7 @@ class FreedomAccessibilityService : AccessibilityService() {
                                     sessionId = sessionId
                                 )
                             }
-                            if (inFlightVideoLookups.add(vid)) {
-                                serviceScope.launch {
-                                    try {
-                                        val cid = container.repository.verifyAndCacheDirectVideoChannel(vid)
-                                        if (cid != null && !container.fastStore.readApprovedChannelsSnapshot().isChannelIdApproved(cid)) {
-                                            mainHandler.post { recheckActiveWindowsNow() }
-                                        }
-                                    } finally {
-                                        inFlightVideoLookups.remove(vid)
-                                    }
-                                }
-                            }
+                            urlRes.shouldStartAsyncLookupForVideoId?.let { launchVideoChannelVerification(it) }
                             if (strictMode) return
                         }
 
@@ -1284,29 +1444,54 @@ class FreedomAccessibilityService : AccessibilityService() {
 
                 // B4. Deep Browser/WebView DOM Inspection (Works across Chrome, Brave, Edge, Firefox,
                 //     Samsung Internet, Opera, Vivo Browser, Reddit In-App WebView, etc.)
-                //     Anti-bounce guard: when a known browser is on an empty New Tab, History,
-                //     Bookmarks, or Downloads screen (no active host & no active search query),
-                //     skip DOM eviction so old history/bookmark items never bounce-exit the browser!
-                if (isKnownBrowserOrGoogle && extractedHost.isNullOrBlank() && activeSearchQuery.isNullOrBlank()) {
+                //     Anti-bounce guard: ONLY skip DOM eviction on genuine empty browser chrome
+                //     (New Tab, History, Bookmarks, Downloads) with NO active scrolled WebView.
+                //     Never skip when a browser merely auto-hid its URL bar while scrolling a webpage!
+                val shouldSkipIdleBrowserChrome = isKnownBrowserOrGoogle &&
+                    extractedHost.isNullOrBlank() &&
+                    activeSearchQuery.isNullOrBlank() &&
+                    (webInfo.isBrowserHomeOrHistoryScreen || !webInfo.isCustomTabOrWebView)
+                if (shouldSkipIdleBrowserChrome) {
                     continue
                 }
-                val pageSnippets = BrowserUrlExtractor.collectBoundedPageSnippets(root, maxSnippets = 48)
+                val pageSnippets = BrowserUrlExtractor.collectCombinedContentEvidence(
+                    root = root,
+                    displayWidth = screenWidth,
+                    displayHeight = screenHeight,
+                    maxPageSnippets = 44,
+                    maxCards = 18,
+                    maxTotalEvidence = 64
+                ).mergedEvidence
 
                 // Mobile-web YouTube Study Mode check when browsing m.youtube.com/youtube.com in a browser
                 if (contentConfig.youtubeStudyModeEnabled &&
                     !extractedHost.isNullOrBlank() &&
                     (extractedHost == "youtube.com" || extractedHost.endsWith(".youtube.com"))
                 ) {
-                    val isWatchLikePage = pageSnippets.any { s ->
+                    val isLiveLikePage = pageSnippets.any { s ->
+                        YouTubeAccessibilityInspector.isLivePlayerIndicator("", s, s)
+                    }
+                    val isWatchLikePage = isLiveLikePage || pageSnippets.any { s ->
                         s.equals("Subscribe", ignoreCase = true) ||
                             s.equals("Subscribed", ignoreCase = true) ||
                             s.equals("Comments", ignoreCase = true)
                     }
+                    if (isLiveLikePage && !contentConfig.youtubeAllowLiveFromApproved) {
+                        enforceContentProtectionEviction(
+                            blockedPackage = pkg,
+                            navigateHome = false,
+                            reason = "YouTube mobile-web Live stream blocked by Study Mode",
+                            notificationText = "Live streams are blocked by Freedom Study Mode.",
+                            sessionId = sessionId
+                        )
+                        return
+                    }
                     if (isWatchLikePage) {
                         val approved = container.fastStore.readApprovedChannelsSnapshot()
                         val anyApprovedMatch = pageSnippets.any { s ->
+                            val (_, canonicalCid) = YouTubeAccessibilityInspector.extractCanonicalIdsFromText(s)
                             approved.matchesAttribution(
-                                channelId = null,
+                                channelId = canonicalCid,
                                 handle = YouTubeStudyEngine.normalizeHandle(s),
                                 channelTitle = s
                             )
@@ -1315,7 +1500,11 @@ class FreedomAccessibilityService : AccessibilityService() {
                             enforceContentProtectionEviction(
                                 blockedPackage = pkg,
                                 navigateHome = false,
-                                reason = "Unapproved YouTube mobile-web video blocked by Study Mode",
+                                reason = if (isLiveLikePage) {
+                                    "Unapproved YouTube mobile-web Live stream blocked by Study Mode"
+                                } else {
+                                    "Unapproved YouTube mobile-web video blocked by Study Mode"
+                                },
                                 notificationText = "Only approved channels can play in Study Mode.",
                                 sessionId = sessionId
                             )
@@ -1393,7 +1582,14 @@ class FreedomAccessibilityService : AccessibilityService() {
                 }
             } else {
                 // C. Silent Always-On Filtering for Native Third-Party Apps (Reddit, Telegram, Discord, etc.)
-                val snippets = BrowserUrlExtractor.collectBoundedPageSnippets(root, maxSnippets = 40)
+                val snippets = BrowserUrlExtractor.collectCombinedContentEvidence(
+                    root = root,
+                    displayWidth = screenWidth,
+                    displayHeight = screenHeight,
+                    maxPageSnippets = 36,
+                    maxCards = 14,
+                    maxTotalEvidence = 52
+                ).mergedEvidence
                 if (MatureMediaCatalog.isInAppPiracyAggregator(snippets)) {
                     enforceContentProtectionEviction(
                         blockedPackage = pkg,
@@ -1813,11 +2009,63 @@ class FreedomAccessibilityService : AccessibilityService() {
         }
     }
 
+    /**
+     * Launches a bounded, non-blocking IO lookup for [videoId] with timeout safety.
+     * Binds the result to [videoId] via [ytVerificationTracker] and discards any stale
+     * completion if the user already switched to a different video.
+     */
+    private fun launchVideoChannelVerification(videoId: String) {
+        val cleanVid = videoId.trim()
+        if (!YouTubeStudyEngine.isValidVideoId(cleanVid)) return
+        val container = (applicationContext as? FreedomApplication)?.container ?: return
+        serviceScope.launch {
+            var resolvedCid: String? = null
+            var failureReason: String? = null
+            try {
+                resolvedCid = withTimeoutOrNull(8_000L) {
+                    container.repository.verifyAndCacheDirectVideoChannel(cleanVid)
+                }
+                if (resolvedCid == null) {
+                    failureReason = "Timed out or unresolvable channel metadata"
+                }
+            } catch (e: Exception) {
+                failureReason = e.message ?: "Verification error"
+            }
+            val completion = ytVerificationTracker.completeAsyncLookup(
+                videoId = cleanVid,
+                resolvedChannelId = resolvedCid,
+                failureReason = failureReason,
+                nowMs = SystemClock.elapsedRealtime()
+            )
+            // Discard stale results completely if the user switched videos before completion!
+            if (completion.appliedToCurrentVideo) {
+                mainHandler.post { recheckActiveWindowsNow() }
+            }
+        }
+    }
+
+    /**
+     * Resolves actual Android display dimensions from WindowManager / DisplayMetrics —
+     * NEVER inferred from AccessibilityNodeInfo root bounds (which may only cover a partial window).
+     */
+    private fun getActualDisplayDimensions(): Pair<Int, Int> {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val wm = getSystemService(Context.WINDOW_SERVICE) as? WindowManager
+            val bounds = runCatching { wm?.currentWindowMetrics?.bounds }.getOrNull()
+            if (bounds != null && bounds.width() > 0 && bounds.height() > 0) {
+                return bounds.width() to bounds.height()
+            }
+        }
+        val dm = resources.displayMetrics
+        return dm.widthPixels.coerceAtLeast(1) to dm.heightPixels.coerceAtLeast(1)
+    }
+
     override fun onInterrupt() = Unit
 
     override fun onDestroy() {
         super.onDestroy()
         mainHandler.removeCallbacksAndMessages(null)
+        ytVerificationTracker.clearAllCache()
         if (::overlayManager.isInitialized) {
             overlayManager.dismiss()
         }
@@ -1835,6 +2083,23 @@ class FreedomAccessibilityService : AccessibilityService() {
 
         fun triggerImmediateWindowCheck() {
             instance?.recheckActiveWindowsNow()
+        }
+
+        /**
+         * Pure decision helper controlling bounded unknown-URL classification:
+         *  - Always classifies a newly navigated URL on first observation.
+         *  - Allows ONE bounded follow-up classification if the initial pass occurred before
+         *    the WebView DOM finished loading (`lastEvidenceCount < 6`) and meaningful DOM/card
+         *    evidence has now arrived (`currentEvidenceCount >= 6`).
+         */
+        internal fun shouldEvaluateUnknownSiteClassification(
+            isNewUrl: Boolean,
+            lastEvidenceCount: Int,
+            lastAttempts: Int,
+            currentEvidenceCount: Int
+        ): Boolean {
+            if (isNewUrl) return true
+            return lastAttempts < 2 && lastEvidenceCount < 6 && currentEvidenceCount >= 6
         }
     }
 }
