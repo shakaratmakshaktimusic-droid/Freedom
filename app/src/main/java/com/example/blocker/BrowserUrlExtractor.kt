@@ -21,7 +21,8 @@ object BrowserUrlExtractor {
         val extractedFullUrl: String? = null,
         val rawUrlWithQuery: String? = null, // Kept strictly in RAM only (never persisted or logged)
         val isKnownBrowser: Boolean = false,
-        val isCustomTabOrWebView: Boolean = false
+        val isCustomTabOrWebView: Boolean = false,
+        val isIncognitoOrPrivateMode: Boolean = false
     )
 
     data class VisibleCardCandidate(
@@ -56,7 +57,14 @@ object BrowserUrlExtractor {
         "com.mi.globalbrowser" to listOf("com.mi.globalbrowser:id/url_tv", "com.mi.globalbrowser:id/search_hint"),
         "com.android.browser" to listOf("com.android.browser:id/url"),
         "mark.via.gp" to listOf("mark.via.gp:id/url_bar"),
-        "org.torproject.torbrowser" to listOf("org.torproject.torbrowser:id/mozac_browser_toolbar_url_view")
+        "org.torproject.torbrowser" to listOf("org.torproject.torbrowser:id/mozac_browser_toolbar_url_view"),
+        "com.vivo.browser" to listOf("com.vivo.browser:id/url_bar", "com.vivo.browser:id/url_text", "com.vivo.browser:id/search_input"),
+        "com.heytap.browser" to listOf("com.heytap.browser:id/url_bar", "com.heytap.browser:id/url_input"),
+        "com.coloros.browser" to listOf("com.coloros.browser:id/url_bar", "com.coloros.browser:id/url_input"),
+        "org.cromite.cromite" to listOf("org.cromite.cromite:id/url_bar"),
+        "com.alohamobile.browser" to listOf("com.alohamobile.browser:id/url_bar", "com.alohamobile.browser:id/address_bar"),
+        "com.mycompany.app.soulbrowser" to listOf("com.mycompany.app.soulbrowser:id/url_bar", "com.mycompany.app.soulbrowser:id/address"),
+        "com.transsion.phoenix" to listOf("com.transsion.phoenix:id/url_bar", "com.transsion.phoenix:id/search_box")
     )
 
     val KNOWN_BROWSER_PACKAGES: Set<String> = BROWSER_URL_BAR_IDS.keys
@@ -94,6 +102,8 @@ object BrowserUrlExtractor {
             )
         }
 
+        val isIncognito = detectIncognitoOrPrivateMode(root)
+
         // 1. Fast path: known browser URL bar IDs
         val knownIds = BROWSER_URL_BAR_IDS[packageName]
         if (knownIds != null) {
@@ -109,7 +119,8 @@ object BrowserUrlExtractor {
                                 extractedFullUrl = extracted.fullNormalizedUrl,
                                 rawUrlWithQuery = extractRawUrlWithQuery(rawCandidate),
                                 isKnownBrowser = true,
-                                isCustomTabOrWebView = classLooksLikeWebContainer
+                                isCustomTabOrWebView = classLooksLikeWebContainer,
+                                isIncognitoOrPrivateMode = isIncognito
                             )
                         }
                     }
@@ -126,7 +137,7 @@ object BrowserUrlExtractor {
         queue.add(root to 0)
         var visited = 0
 
-        while (queue.isNotEmpty() && visited < 48) {
+        while (queue.isNotEmpty() && visited < 64) {
             val (node, depth) = queue.removeFirst()
             visited++
 
@@ -155,7 +166,7 @@ object BrowserUrlExtractor {
                 break
             }
 
-            if (depth < 5) {
+            if (depth < 6) {
                 val childCount = node.childCount.coerceAtMost(14)
                 for (i in 0 until childCount) {
                     node.getChild(i)?.let { queue.add(it to depth + 1) }
@@ -168,8 +179,46 @@ object BrowserUrlExtractor {
             extractedFullUrl = foundUrl?.fullNormalizedUrl,
             rawUrlWithQuery = foundRawUrl,
             isKnownBrowser = isKnownBrowser,
-            isCustomTabOrWebView = hasWebViewNode
+            isCustomTabOrWebView = hasWebViewNode,
+            isIncognitoOrPrivateMode = isIncognito
         )
+    }
+
+    /**
+     * Lightweight toolbar-only check for Incognito / Private browsing mode across Chrome,
+     * Brave, Edge, Firefox, Samsung Internet, and Opera so Freedom NEVER fires an external
+     * Intent that would kick an Incognito tab into Normal mode.
+     */
+    private fun detectIncognitoOrPrivateMode(root: AccessibilityNodeInfo): Boolean {
+        val queue = ArrayDeque<Pair<AccessibilityNodeInfo, Int>>()
+        queue.add(root to 0)
+        var visited = 0
+        while (queue.isNotEmpty() && visited < 36) {
+            val (node, depth) = queue.removeFirst()
+            visited++
+            val resId = node.viewIdResourceName?.lowercase().orEmpty()
+            val desc = node.contentDescription?.toString()?.lowercase().orEmpty()
+            val text = node.text?.toString()?.lowercase().orEmpty()
+
+            if (resId.contains("incognito") ||
+                resId.contains("private_browsing") ||
+                resId.contains("secret_mode") ||
+                desc.contains("incognito") ||
+                desc.contains("private tab") ||
+                desc.contains("secret mode") ||
+                text == "incognito" ||
+                text.startsWith("you've gone incognito") ||
+                text.startsWith("you’ve gone incognito")
+            ) {
+                return true
+            }
+            if (depth < 4) {
+                for (i in 0 until node.childCount.coerceAtMost(10)) {
+                    node.getChild(i)?.let { queue.add(it to depth + 1) }
+                }
+            }
+        }
+        return false
     }
 
     /**

@@ -29,6 +29,7 @@ object SafeSearchEngine {
         data object NotASearchUrl : Decision()
         data class Compliant(val providerName: String, val searchQuery: String?) : Decision()
         data class EnforceRedirect(
+            val providerId: String,
             val providerName: String,
             val enforcedUrl: String,
             val searchQuery: String?
@@ -217,6 +218,7 @@ object SafeSearchEngine {
             val currentVal = params[matchedProvider.strictParamKey]?.lowercase()
             if (strictMode && currentVal != null && currentVal in matchedProvider.unsafeParamValues) {
                 val enforced = buildEnforcedUrl(
+                    providerId = matchedProvider.providerId,
                     rawHostPart = rawHostPart,
                     path = path,
                     params = params,
@@ -224,6 +226,7 @@ object SafeSearchEngine {
                     strictValue = matchedProvider.strictParamValue
                 )
                 return Decision.EnforceRedirect(
+                    providerId = matchedProvider.providerId,
                     providerName = matchedProvider.displayName,
                     enforcedUrl = enforced,
                     searchQuery = searchQuery
@@ -248,6 +251,7 @@ object SafeSearchEngine {
             if (matchedProvider.enforceMethod == SafeSearchEnforceMethod.URL_PARAM) {
                 if (currentVal != matchedProvider.strictParamValue.lowercase()) {
                     val enforced = buildEnforcedUrl(
+                        providerId = matchedProvider.providerId,
                         rawHostPart = rawHostPart,
                         path = path,
                         params = params,
@@ -255,6 +259,7 @@ object SafeSearchEngine {
                         strictValue = matchedProvider.strictParamValue
                     )
                     return Decision.EnforceRedirect(
+                        providerId = matchedProvider.providerId,
                         providerName = matchedProvider.displayName,
                         enforcedUrl = enforced,
                         searchQuery = searchQuery
@@ -379,6 +384,7 @@ object SafeSearchEngine {
     }
 
     private fun buildEnforcedUrl(
+        providerId: String,
         rawHostPart: String,
         path: String,
         params: LinkedHashMap<String, String>,
@@ -390,6 +396,10 @@ object SafeSearchEngine {
         val toRemove = updated.keys.filter { it.equals(strictKey, ignoreCase = true) }
         for (k in toRemove) updated.remove(k)
         updated[strictKey] = strictValue
+        // On Google Search, `ssui=on` locks SafeSearch across ALL signed-in Google accounts
+        if (providerId == "google") {
+            updated["ssui"] = "on"
+        }
 
         val queryEncoded = updated.entries.joinToString("&") { (k, v) ->
             val ek = runCatching { URLEncoder.encode(k, "UTF-8") }.getOrDefault(k)

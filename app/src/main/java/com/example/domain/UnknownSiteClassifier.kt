@@ -222,48 +222,28 @@ object UnknownSiteClassifier {
     }
 
     /**
-     * Scores unmoderated free movie/TV streaming sites and stream-aggregator directories
-     * (e.g. fmhy.net/video, atlantic.bz/title/movie/..., rotating .bz/.to/.cc mirrors).
+     * Scores unmoderated free movie/TV streaming sites, piracy download portals, and
+     * stream-aggregator directories (e.g. fmhy.net/video, atlantic.bz, movies4u.vet, rotating mirrors).
      */
     fun scoreUnmoderatedStreamingSite(
         host: String,
         fullUrl: String,
         visibleTextSnippets: List<String>
-    ): Int {
-        val normalizedHost = DomainBlockMatcher.normalizeDomain(host) ?: return 0
-        if (isSafeDomain(normalizedHost)) return 0
-        val boundedPageText = visibleTextSnippets
-            .take(48)
-            .joinToString(" ") { it.take(180) }
-            .lowercase()
-        return scoreTvVideoSignals(normalizedHost.lowercase(), fullUrl.lowercase(), boundedPageText)
-    }
+    ): Int = MatureMediaCatalog.scorePiracyOrUnmoderatedMediaSite(
+        host = host,
+        fullUrl = fullUrl,
+        visibleTextSnippets = visibleTextSnippets
+    )
 
     private fun scoreTvVideoSignals(
         lowerHost: String,
         lowerUrl: String,
         boundedPageText: String
-    ): Int {
-        var score = 0
-        for (token in TV_VIDEO_STRONG_HOST_TOKENS) {
-            if (lowerHost.contains(token)) {
-                score += 6
-                break
-            }
-        }
-        if (TV_VIDEO_URL_PATH_SIGNALS.any { lowerUrl.contains(it) }) {
-            score += 3
-        }
-        var pageHits = 0
-        for (signal in TV_VIDEO_PAGE_SIGNALS) {
-            if (boundedPageText.contains(signal)) {
-                pageHits++
-                score += 2
-                if (pageHits >= 4) break
-            }
-        }
-        return score
-    }
+    ): Int = MatureMediaCatalog.scorePiracyOrUnmoderatedMediaSite(
+        host = lowerHost,
+        fullUrl = lowerUrl,
+        visibleTextSnippets = listOf(boundedPageText)
+    )
 
     fun isSafeDomain(normalizedHost: String): Boolean {
         if (WebsiteCatalog.CLASSIFIER_SAFE_TLDS.any { normalizedHost.endsWith(it) }) return true

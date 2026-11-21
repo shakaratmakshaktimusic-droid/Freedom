@@ -27,6 +27,7 @@ object YouTubeAccessibilityInspector {
         val activeVideoTitle: String? = null,
         val miniPlayerVisible: Boolean = false,
         val miniPlayerSubtitle: String? = null,
+        val miniPlayerBounds: Rect? = null,
         val allVisibleSnippets: List<String> = emptyList()
     )
 
@@ -72,7 +73,8 @@ object YouTubeAccessibilityInspector {
         var activeChannelHandle: String? = null
         var activeVideoTitle: String? = null
         var miniPlayerSubtitle: String? = null
-        val snippets = ArrayList<String>(36)
+        var miniPlayerBounds: Rect? = null
+        val snippets = ArrayList<String>(40)
 
         val queue = ArrayDeque<Pair<AccessibilityNodeInfo, Int>>()
         queue.add(root to 0)
@@ -80,17 +82,19 @@ object YouTubeAccessibilityInspector {
         val bounds = Rect()
 
         val watchHeaderMaxY = (screenHeight * 0.68f).toInt()
-        val miniPlayerMinY = (screenHeight * 0.65f).toInt()
+        val miniPlayerMinY = (screenHeight * 0.58f).toInt()
+        val bottomNavStartY = (screenHeight * 0.90f).toInt()
 
-        while (queue.isNotEmpty() && visited < 130) {
+        while (queue.isNotEmpty() && visited < 160) {
             val (node, depth) = queue.removeFirst()
             visited++
 
             val resId = node.viewIdResourceName?.lowercase().orEmpty()
             val text = node.text?.toString()?.trim().orEmpty()
             val desc = node.contentDescription?.toString()?.trim().orEmpty()
+            val lowerDesc = desc.lowercase()
 
-            if (snippets.size < 36) {
+            if (snippets.size < 40) {
                 if (text.length in 2..150) snippets.add(text)
                 else if (desc.length in 2..150) snippets.add(desc)
             }
@@ -99,20 +103,48 @@ object YouTubeAccessibilityInspector {
             if (!hasShortsContainer && SHORTS_ID_TOKENS.any { resId.contains(it) }) {
                 hasShortsContainer = true
             }
-            if (!hasShortsContainer && desc.contains("shorts player", ignoreCase = true)) {
+            if (!hasShortsContainer && lowerDesc.contains("shorts player")) {
                 hasShortsContainer = true
             }
 
-            // 2. Detect Watch player vs. bottom in-app Miniplayer
-            if (MINIPLAYER_ID_TOKENS.any { resId.contains(it) } ||
-                desc.contains("close miniplayer", ignoreCase = true) ||
-                desc.contains("expand miniplayer", ignoreCase = true)
-            ) {
+            // 2. Detect Watch player vs. bottom in-app Miniplayer (3 independent signals so fast
+            //    swipe-down before buffering finishes can NEVER bypass Study Mode!)
+            val looksLikeMiniPlayerNode = MINIPLAYER_ID_TOKENS.any { resId.contains(it) } ||
+                lowerDesc.contains("close miniplayer") ||
+                lowerDesc.contains("dismiss miniplayer") ||
+                lowerDesc.contains("expand miniplayer") ||
+                lowerDesc == "close player" ||
+                lowerDesc == "close video"
+
+            if (looksLikeMiniPlayerNode) {
                 node.getBoundsInScreen(bounds)
-                if (bounds.height() in 20..(screenHeight * 0.24f).toInt() && bounds.top >= miniPlayerMinY) {
+                if (bounds.height() in 16..(screenHeight * 0.28f).toInt() && bounds.top >= miniPlayerMinY) {
                     hasMiniPlayer = true
+                    if (miniPlayerBounds == null || bounds.width() > (miniPlayerBounds?.width() ?: 0)) {
+                        miniPlayerBounds = Rect(bounds)
+                    }
                     if (miniPlayerSubtitle == null) {
                         extractMiniPlayerChannelText(node)?.let { miniPlayerSubtitle = it }
+                    }
+                }
+            }
+
+            // Signal 2b: Any "Pause video" / "Play video" / "Pause" / "Play" / "Close" control sitting
+            // inside the bottom miniplayer band (above the bottom nav bar) when not fullscreen Watch!
+            if (!hasMiniPlayer && (
+                    lowerDesc == "pause video" || lowerDesc == "play video" ||
+                        lowerDesc == "pause" || lowerDesc == "play" ||
+                        lowerDesc == "replay video" ||
+                        resId.contains("miniplayer_play") || resId.contains("floaty")
+                    )
+            ) {
+                node.getBoundsInScreen(bounds)
+                if (bounds.top >= miniPlayerMinY && bounds.bottom <= bottomNavStartY + 80 &&
+                    bounds.height() in 16..(screenHeight * 0.16f).toInt()
+                ) {
+                    hasMiniPlayer = true
+                    if (miniPlayerBounds == null) {
+                        miniPlayerBounds = Rect(0, bounds.top, screenWidth, bounds.bottom)
                     }
                 }
             }
@@ -121,8 +153,11 @@ object YouTubeAccessibilityInspector {
                 node.getBoundsInScreen(bounds)
                 if (bounds.height() > (screenHeight * 0.18f).toInt()) {
                     hasWatchPlayer = true
-                } else if (bounds.height() in 28..(screenHeight * 0.18f).toInt() && bounds.top >= miniPlayerMinY) {
+                } else if (bounds.height() in 24..(screenHeight * 0.18f).toInt() && bounds.top >= miniPlayerMinY) {
                     hasMiniPlayer = true
+                    if (miniPlayerBounds == null) {
+                        miniPlayerBounds = Rect(bounds)
+                    }
                 }
             }
 
@@ -232,6 +267,7 @@ object YouTubeAccessibilityInspector {
             activeVideoTitle = activeVideoTitle,
             miniPlayerVisible = hasMiniPlayer,
             miniPlayerSubtitle = miniPlayerSubtitle,
+            miniPlayerBounds = miniPlayerBounds,
             allVisibleSnippets = snippets
         )
     }

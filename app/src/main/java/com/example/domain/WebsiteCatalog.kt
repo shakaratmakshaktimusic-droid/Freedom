@@ -132,6 +132,16 @@ object WebsiteCatalog {
             id = "blocklistproject_redirect",
             category = WebsiteCategory.TIME_WASTERS,
             url = "https://raw.githubusercontent.com/blocklistproject/Lists/master/alt-version/redirect-nl.txt"
+        ),
+        CommunityFilterFeed(
+            id = "blocklistproject_piracy",
+            category = WebsiteCategory.TV_VIDEO,
+            url = "https://raw.githubusercontent.com/blocklistproject/Lists/master/alt-version/piracy-nl.txt"
+        ),
+        CommunityFilterFeed(
+            id = "blocklistproject_torrent",
+            category = WebsiteCategory.TV_VIDEO,
+            url = "https://raw.githubusercontent.com/blocklistproject/Lists/master/alt-version/torrent-nl.txt"
         )
     )
 
@@ -197,8 +207,11 @@ object WebsiteCatalog {
             "lookmovie2.to", "moviesjoy.to", "moviesjoy.is", "myflixerz.to", "myflixer.to",
             "cineb.rs", "bflix.to", "bflixhd.to", "solarmovie.pe", "putlocker.pe",
             "watchseries.pe", "watchseriesx.to", "gomovies.sx", "himovies.sx",
-            "netmirror.app", "vegamovies.nl", "vegamovies.rs", "hdhub4u.tv", "hdhub4u.com",
+            "netmirror.app", "movies4u.vet", "movies4u.bid", "movies4u.com",
+            "vegamovies.nl", "vegamovies.rs", "hdhub4u.tv", "hdhub4u.com",
             "bollyflix.to", "filmyzilla.com", "katmoviehd.to", "moviesmod.org",
+            "mkvcine.com", "worldfree4u.wiki", "9xmovies.com", "movierulz.com",
+            "tamilrockers.com", "ibomma.net", "uwatchfree.pe", "prmovies.com",
             "hianime.to", "aniwatchtv.to", "gogoanime3.co", "kisskh.co", "dramacool.pa",
             "yts.mx", "1337x.to", "thepiratebay.org"
         ),

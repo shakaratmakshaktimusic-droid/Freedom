@@ -83,7 +83,9 @@ object InAppAdultFilterEngine {
                 "cG9ybm9ncmFmaWE=", "ZGVzbnVkYQ==", "ZGVzbnVkYXM=", "Zm9sbGFy", "Y29nZXI=",
                 "cHV0YQ==", "c2V4bw==", "Y2FsZW50dXJh", "YmFpc2Vy", "c2V4dWVs", "c2V4dWVsbGU=",
                 "bnVl", "bnVkaXRl", "cHV0YXJpYQ==", "Zm9kZXI=", "Z296YXI=", "c2V4dWFsZGFkZQ==",
-                "Zmlja2Vu", "bmFja3Q=", "c2NobGFtcGU=", "c2lraXM=", "c2V2aXNtZQ==", "Ym9rZXA=",
+                "Zmlja2Vu", "bmFja3Q=", "bmFja3Rl", "c2NobGFtcGU=", "c2V4dWVsbGVy",
+                "c2V4dWVsbGVz", "ZWtzdGFzZQ==", "dW5nZXNjaG5pdHRlbmU=", "ZXJvdGlzY2g=",
+                "ZXJvdGlzY2hl", "cG9ybm9maWxt", "c2lraXM=", "c2V2aXNtZQ==", "Ym9rZXA=",
                 "bmdlbnRvdA==", "YnVnZ2ls", "YnVnaWw=", "Y2lwYW4=",
                 // Arabic explicit roots
                 "2LPZg9iz", "2KXYqNin2K3Zitip", "2KfYqNin2K3Zitip", "2LnYp9ix2YrYqQ==", "2KzZhtiz2Yo=",
@@ -219,6 +221,10 @@ object InAppAdultFilterEngine {
      */
     fun evaluateQueryOrUrl(rawText: String?): DetectionResult {
         if (rawText.isNullOrBlank()) return DetectionResult(false, 0)
+        val mature = MatureMediaCatalog.evaluateMatureMediaText(rawText)
+        if (mature.isFlagged) {
+            return DetectionResult(true, 4, mature.reason)
+        }
         return scoreText(rawText, threshold = 3)
     }
 
@@ -227,6 +233,10 @@ object InAppAdultFilterEngine {
      */
     fun evaluateCardText(snippets: List<String>): DetectionResult {
         if (snippets.isEmpty()) return DetectionResult(false, 0)
+        val mature = MatureMediaCatalog.evaluateMatureMediaText(null, snippets)
+        if (mature.isFlagged) {
+            return DetectionResult(true, 4, mature.reason)
+        }
         val combined = snippets.joinToString(" ")
         return scoreText(combined, threshold = 3)
     }
@@ -243,6 +253,11 @@ object InAppAdultFilterEngine {
         isApprovedYouTubeChannel: Boolean = false
     ): DetectionResult {
         if (isApprovedYouTubeChannel) return DetectionResult(false, 0)
+
+        val matureMatch = MatureMediaCatalog.evaluateMatureMediaText(urlOrQuery, visibleSnippets)
+        if (matureMatch.isFlagged) {
+            return DetectionResult(true, 4, matureMatch.reason)
+        }
 
         // Check combined context first so spiritual/recovery framing on the page
         // (e.g. "ISKCON Desire Tree" channel name next to "Overcome Porn Addiction" video title)

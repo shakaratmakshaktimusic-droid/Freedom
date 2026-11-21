@@ -577,6 +577,70 @@ class ContentProtectionUnitTest {
     }
 
     @Test
+    fun matureSeriesDatabase_movies4uOffline_redditFmhy_andGoogleMultiAccountSafeSearch() {
+        // 1. Google SafeSearch includes ssui=on for multi-account SafeSearch lock
+        val googleEnforce = SafeSearchEngine.evaluateUrl(
+            rawUrl = "https://www.google.com/search?q=linear+algebra",
+            config = studyConfig,
+            strictMode = true
+        )
+        assertTrue(googleEnforce is SafeSearchEngine.Decision.EnforceRedirect)
+        val enforcedUrl = (googleEnforce as SafeSearchEngine.Decision.EnforceRedirect).enforcedUrl
+        assertTrue(enforcedUrl.contains("safe=active"))
+        assertTrue(enforcedUrl.contains("ssui=on"))
+
+        // 2. Adult web series & explicit TV shows (e.g. "shameless web series" on YouTube)
+        assertTrue(InAppAdultFilterEngine.evaluateQueryOrUrl("shameless web series").isFlagged)
+        assertTrue(InAppAdultFilterEngine.evaluateQueryOrUrl("euphoria hot scenes").isFlagged)
+        assertTrue(InAppAdultFilterEngine.evaluateQueryOrUrl("gandii baat full episode").isFlagged)
+        assertFalse(
+            "Ordinary non-media usage of 'shameless' should not be falsely flagged",
+            InAppAdultFilterEngine.evaluateQueryOrUrl("shameless corruption in local council news").isFlagged
+        )
+
+        // 3. Offline Chrome URL bar (`Offline | movies4u.vet`) & structural piracy portal detection
+        val extracted = com.example.domain.DomainBlockMatcher.extractUrlFromUiText("Offline | movies4u.vet")
+        assertEquals("movies4u.vet", extracted?.host)
+
+        val movies4uSnippets = listOf(
+            "MOVIES4U",
+            "TV SHOW",
+            "URDU",
+            "WEB SERIES",
+            "Tantra Das Geheimnis Sexueller Ekstase (2026) WEB-DL English + German 1080p",
+            "Tantra (2024) WEB-DL Hindi 480p | 720p | 1080p"
+        )
+        assertTrue(
+            "movies4u.vet must be blocked structurally",
+            com.example.domain.MatureMediaCatalog.scorePiracyOrUnmoderatedMediaSite(
+                host = "movies4u.vet",
+                fullUrl = "https://movies4u.vet",
+                visibleTextSnippets = movies4uSnippets
+            ) >= 6
+        )
+        assertTrue(
+            "Brand-new unknown piracy download portal mirror must also be blocked structurally",
+            com.example.domain.MatureMediaCatalog.scorePiracyOrUnmoderatedMediaSite(
+                host = "freshdownloads88.vet",
+                fullUrl = "https://freshdownloads88.vet",
+                visibleTextSnippets = movies4uSnippets
+            ) >= 6
+        )
+        assertTrue(
+            "German explicit film title on movies4u.vet must also trigger InAppAdultFilterEngine",
+            InAppAdultFilterEngine.evaluateActiveContent("movies4u.vet", movies4uSnippets).isFlagged
+        )
+
+        // 4. Reddit r/FREEMEDIAHECKYEAH wiki / in-app FMHY detection
+        assertTrue(
+            "Reddit r/FREEMEDIAHECKYEAH must be caught in-app",
+            com.example.domain.MatureMediaCatalog.isInAppPiracyAggregator(
+                listOf("r/FREEMEDIAHECKYEAH", "Wiki", "Streaming / Video", "fmhy.net")
+            )
+        )
+    }
+
+    @Test
     fun strictModePolicy_locksContentProtectionChanges() {
         assertTrue(
             StrictModePolicy.canDisableContentProtection("YouTube Study Mode", true) is StrictModePolicy.GuardResult.Denied
