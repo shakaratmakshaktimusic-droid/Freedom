@@ -73,10 +73,10 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.ui.FreedomViewModel
 import com.example.ui.screens.BlocklistsScreen
-import com.example.ui.screens.ContentProtectionScreen
 import com.example.ui.screens.SessionsScreen
 import com.example.ui.screens.SettingsScreen
 import com.example.ui.screens.TodayScreen
+import com.example.ui.screens.YouTubeStudyManagerView
 import com.example.ui.theme.BackdropMood
 import com.example.ui.theme.ForestGlassBackdrop
 import com.example.ui.theme.FreedomGlass
@@ -161,26 +161,19 @@ private fun FreedomAppRoot(viewModel: FreedomViewModel) {
                     .padding(innerPadding)
             ) {
                 if (showContentProtection) {
-                    ContentProtectionScreen(
+                    YouTubeStudyManagerView(
                         uiState = uiState,
                         channelLookupFlow = viewModel.channelLookupState,
-                        onToggleYouTubeStudyMode = { viewModel.setYouTubeStudyModeEnabled(it) },
-                        onToggleYouTubeMaskFeedCards = { viewModel.setYouTubeMaskFeedCards(it) },
-                        onToggleYouTubeAllowShorts = { viewModel.setYouTubeAllowShorts(it) },
-                        onToggleYouTubeAllowLive = { viewModel.setYouTubeAllowLive(it) },
-                        onSaveYouTubeApiKey = { viewModel.saveYouTubeDataApiKey(it) },
-                        onLookupYouTubeChannel = { viewModel.lookupYouTubeChannel(it) },
+                        onToggleStudyMode = { viewModel.setYouTubeStudyModeEnabled(it) },
+                        onToggleAllowShorts = { viewModel.setYouTubeAllowShorts(it) },
+                        onToggleAllowLive = { viewModel.setYouTubeAllowLive(it) },
+                        onSaveApiKey = { viewModel.saveYouTubeDataApiKey(it) },
+                        onLookupChannel = { viewModel.lookupYouTubeChannel(it) },
                         onVerifyManualChannelId = { viewModel.verifyManualYouTubeChannelId(it) },
                         onSelectSearchCandidate = { viewModel.selectSearchCandidateForConfirmation(it) },
                         onConfirmApproveChannel = { viewModel.confirmApproveYouTubeChannel(it) },
                         onRemoveApprovedChannel = { viewModel.removeApprovedYouTubeChannel(it) },
-                        onResetChannelLookup = { viewModel.resetChannelLookup() },
-                        onToggleSafeSearch = { viewModel.setSafeSearchEnabled(it) },
-                        onToggleBlockUnverifiedSearch = { viewModel.setBlockUnverifiedSearchEngines(it) },
-                        onRefreshSafeSearchRules = { viewModel.refreshSafeSearchRulesNow() },
-                        onToggleInAppAdultFilter = { viewModel.setInAppAdultFilterEnabled(it) },
-                        onToggleBlockImageSearchStrict = { viewModel.setBlockImageSearchInStrictMode(it) },
-                        onToggleBlockUnfilterableAppsStrict = { viewModel.setBlockUnfilterableAppsInStrictMode(it) },
+                        onResetLookup = { viewModel.resetChannelLookup() },
                         onBack = {
                             viewModel.resetChannelLookup()
                             showContentProtection = false

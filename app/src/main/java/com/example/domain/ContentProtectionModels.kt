@@ -3,26 +3,28 @@ package com.example.domain
 import androidx.compose.runtime.Immutable
 
 /**
- * Always-on Content Protection configuration.
- * All three engines (YouTube Study Mode, Universal SafeSearch, In-App Adult Filtering)
- * work independently even outside focus sessions, and automatically lock against
- * disabling or weakening whenever Strict Mode is active.
+ * Content Protection configuration.
+ *
+ * Universal SafeSearch and In-App Adult/Mature-Media Protection run silently and
+ * permanently in the background whenever Freedom's Accessibility Service is enabled
+ * (zero UI off-switches). YouTube Study Mode remains user-configurable and
+ * automatically locks against disabling or editing during Strict Mode.
  */
 @Immutable
 data class ContentProtectionConfig(
     val youtubeStudyModeEnabled: Boolean = false,
-    val youtubeMaskFeedCards: Boolean = true,
+    val youtubeMaskFeedCards: Boolean = false,
     val youtubeAllowShortsFromApproved: Boolean = false,
     val youtubeAllowLiveFromApproved: Boolean = false,
     val youtubeDataApiKey: String = "",
-    val safeSearchEnabled: Boolean = false,
+    val safeSearchEnabled: Boolean = true,
     val blockUnverifiedSearchEnginesInStrictMode: Boolean = true,
-    val inAppAdultFilterEnabled: Boolean = false,
-    val blockImageSearchInStrictMode: Boolean = false,
-    val blockUnfilterableAppsInStrictMode: Boolean = false
+    val inAppAdultFilterEnabled: Boolean = true,
+    val blockImageSearchInStrictMode: Boolean = true,
+    val blockUnfilterableAppsInStrictMode: Boolean = true
 ) {
     val anyProtectionEnabled: Boolean
-        get() = youtubeStudyModeEnabled || safeSearchEnabled || inAppAdultFilterEnabled
+        get() = true
 }
 
 enum class YouTubeClientSupportTier(val label: String, val canVerifyChannelsReliably: Boolean) {

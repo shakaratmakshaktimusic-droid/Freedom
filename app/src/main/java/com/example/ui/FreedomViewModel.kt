@@ -537,10 +537,6 @@ class FreedomViewModel(application: Application) : AndroidViewModel(application)
         applyContentProtectionUpdate { it.copy(youtubeStudyModeEnabled = enabled) }
     }
 
-    fun setYouTubeMaskFeedCards(enabled: Boolean) {
-        applyContentProtectionUpdate { it.copy(youtubeMaskFeedCards = enabled) }
-    }
-
     fun setYouTubeAllowShorts(enabled: Boolean) {
         applyContentProtectionUpdate { it.copy(youtubeAllowShortsFromApproved = enabled) }
     }
@@ -555,26 +551,6 @@ class FreedomViewModel(application: Application) : AndroidViewModel(application)
             if (apiKey.isBlank()) "YouTube Data API v3 fallback key cleared."
             else "YouTube Data API v3 fallback key saved locally."
         )
-    }
-
-    fun setSafeSearchEnabled(enabled: Boolean) {
-        applyContentProtectionUpdate { it.copy(safeSearchEnabled = enabled) }
-    }
-
-    fun setBlockUnverifiedSearchEngines(enabled: Boolean) {
-        applyContentProtectionUpdate { it.copy(blockUnverifiedSearchEnginesInStrictMode = enabled) }
-    }
-
-    fun setInAppAdultFilterEnabled(enabled: Boolean) {
-        applyContentProtectionUpdate { it.copy(inAppAdultFilterEnabled = enabled) }
-    }
-
-    fun setBlockImageSearchInStrictMode(enabled: Boolean) {
-        applyContentProtectionUpdate { it.copy(blockImageSearchInStrictMode = enabled) }
-    }
-
-    fun setBlockUnfilterableAppsInStrictMode(enabled: Boolean) {
-        applyContentProtectionUpdate { it.copy(blockUnfilterableAppsInStrictMode = enabled) }
     }
 
     fun lookupYouTubeChannel(rawInput: String) {

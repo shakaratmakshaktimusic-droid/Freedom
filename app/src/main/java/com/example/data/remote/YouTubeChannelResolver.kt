@@ -289,10 +289,24 @@ class YouTubeChannelResolver(
     ): ChannelLookupState {
         // Tier 1: Public YouTube channel-only search (`sp=EgIQAg%3D%3D` filters strictly to Channels)
         val encodedQuery = URLEncoder.encode(query, "UTF-8")
-        val searchUrl = "https://www.youtube.com/results?search_query=$encodedQuery&sp=EgIQAg%253D%253D"
-        val res = httpGet(searchUrl)
+        val filteredSearchUrl = "https://www.youtube.com/results?search_query=$encodedQuery&sp=EgIQAg%3D%3D"
+        val res = httpGet(filteredSearchUrl)
         if (res.isSuccess) {
             val candidates = parseSearchChannelsFromHtml(res.body.orEmpty())
+            if (candidates.isNotEmpty()) {
+                return ChannelLookupState.SearchResults(
+                    query = query,
+                    candidates = candidates,
+                    source = ChannelVerificationSource.PUBLIC_METADATA
+                )
+            }
+        }
+
+        // Tier 1 backup: unfiltered YouTube results page (still extracts strictly channelRenderer/compactChannelRenderer)
+        val fallbackSearchUrl = "https://www.youtube.com/results?search_query=$encodedQuery"
+        val fallbackRes = httpGet(fallbackSearchUrl)
+        if (fallbackRes.isSuccess) {
+            val candidates = parseSearchChannelsFromHtml(fallbackRes.body.orEmpty())
             if (candidates.isNotEmpty()) {
                 return ChannelLookupState.SearchResults(
                     query = query,
@@ -621,46 +635,60 @@ class YouTubeChannelResolver(
 
         fun parseSearchChannelsFromHtml(html: String): List<VerifiedYouTubeChannel> {
             val seen = LinkedHashMap<String, VerifiedYouTubeChannel>()
-            // Slice around each channelRenderer block to accurately bind id, title, handle & avatar
-            val marker = "\"channelRenderer\":{"
-            var searchStart = 0
-            while (seen.size < 10) {
-                val idx = html.indexOf(marker, searchStart)
-                if (idx == -1) break
-                val endIdx = (idx + 2400).coerceAtMost(html.length)
-                val block = html.substring(idx, endIdx)
-                searchStart = idx + marker.length
+            // Support BOTH desktop ("channelRenderer") and mobile ("compactChannelRenderer") JSON blocks
+            val markers = listOf("\"channelRenderer\":{", "\"compactChannelRenderer\":{")
+            for (marker in markers) {
+                var searchStart = 0
+                while (seen.size < 10) {
+                    val idx = html.indexOf(marker, searchStart)
+                    if (idx == -1) break
+                    val endIdx = (idx + 2800).coerceAtMost(html.length)
+                    val block = html.substring(idx, endIdx)
+                    searchStart = idx + marker.length
 
-                val cid = Regex("\"channelId\"\\s*:\\s*\"(UC[A-Za-z0-9_-]{22})\"").find(block)?.groupValues?.getOrNull(1)
-                    ?: continue
-                if (cid in seen) continue
+                    val cid = Regex("\"channelId\"\\s*:\\s*\"(UC[A-Za-z0-9_-]{22})\"").find(block)
+                        ?.groupValues?.getOrNull(1)
+                        ?: continue
+                    if (cid in seen) continue
 
-                val title = Regex("\"title\"\\s*:\\s*\\{\"simpleText\"\\s*:\\s*\"([^\"]+)\"").find(block)
-                    ?.groupValues?.getOrNull(1)?.let(::unescapeJson)?.trim()
-                    ?: continue
-                if (title.isEmpty()) continue
+                    val title = Regex("\"(?:title|displayName)\"\\s*:\\s*\\{\"simpleText\"\\s*:\\s*\"([^\"]+)\"").find(block)
+                        ?.groupValues?.getOrNull(1)?.let(::unescapeJson)?.trim()
+                        ?: Regex("\"(?:title|displayName)\"\\s*:\\s*\\{\"runs\"\\s*:\\s*\\[\\{\"text\"\\s*:\\s*\"([^\"]+)\"").find(block)
+                            ?.groupValues?.getOrNull(1)?.let(::unescapeJson)?.trim()
+                        ?: continue
+                    if (title.isEmpty()) continue
 
-                val handle = CANONICAL_HANDLE_REGEX.find(block)?.groupValues?.getOrNull(1)?.lowercase().orEmpty()
-                val avatarRaw = Regex("\"thumbnails\"\\s*:\\s*\\[\\{\"url\"\\s*:\\s*\"([^\"]+)\"").find(block)
-                    ?.groupValues?.getOrNull(1)?.let(::unescapeJson).orEmpty()
-                val avatarUrl = when {
-                    avatarRaw.startsWith("//") -> "https:$avatarRaw"
-                    else -> avatarRaw
-                }
-                val subs = Regex("\"videoCountText\"\\s*:\\s*\\{\"simpleText\"\\s*:\\s*\"([^\"]+)\"").find(block)
-                    ?.groupValues?.getOrNull(1)?.let(::unescapeJson)
-                    ?: Regex("\"subscriberCountText\"\\s*:\\s*\\{\"simpleText\"\\s*:\\s*\"([^\"]+)\"").find(block)
+                    val handle = CANONICAL_HANDLE_REGEX.find(block)?.groupValues?.getOrNull(1)?.lowercase()
+                        ?: Regex("\"(?:subscriberCountText|videoCountText)\"\\s*:\\s*\\{\"simpleText\"\\s*:\\s*\"(@[A-Za-z0-9._-]+)\"").find(block)
+                            ?.groupValues?.getOrNull(1)?.lowercase()
+                        ?: ""
+
+                    val avatarRaw = Regex("\"thumbnails\"\\s*:\\s*\\[\\{\"url\"\\s*:\\s*\"([^\"]+)\"").find(block)
+                        ?.groupValues?.getOrNull(1)?.let(::unescapeJson).orEmpty()
+                    val avatarUrl = when {
+                        avatarRaw.startsWith("//") -> "https:$avatarRaw"
+                        else -> avatarRaw
+                    }
+
+                    val subs = Regex("\"videoCountText\"\\s*:\\s*\\{\"simpleText\"\\s*:\\s*\"([^\"]+)\"").find(block)
                         ?.groupValues?.getOrNull(1)?.let(::unescapeJson)
-                    ?: ""
+                        ?.takeIf { !it.startsWith("@") }
+                        ?: Regex("\"subscriberCountText\"\\s*:\\s*\\{\"simpleText\"\\s*:\\s*\"([^\"]+)\"").find(block)
+                            ?.groupValues?.getOrNull(1)?.let(::unescapeJson)
+                            ?.takeIf { !it.startsWith("@") }
+                        ?: Regex("\"subscriberCountText\"\\s*:\\s*\\{\"runs\"\\s*:\\s*\\[\\{\"text\"\\s*:\\s*\"([^\"]+)\"").find(block)
+                            ?.groupValues?.getOrNull(1)?.let(::unescapeJson)
+                        ?: ""
 
-                seen[cid] = VerifiedYouTubeChannel(
-                    channelId = cid,
-                    handle = handle,
-                    title = title,
-                    avatarUrl = avatarUrl,
-                    subscriberSummary = subs,
-                    verifiedSource = ChannelVerificationSource.PUBLIC_METADATA
-                )
+                    seen[cid] = VerifiedYouTubeChannel(
+                        channelId = cid,
+                        handle = handle,
+                        title = title,
+                        avatarUrl = avatarUrl,
+                        subscriberSummary = subs,
+                        verifiedSource = ChannelVerificationSource.PUBLIC_METADATA
+                    )
+                }
             }
             // Fallback regex pass if YouTube slightly adjusts JSON ordering
             if (seen.isEmpty()) {
@@ -684,6 +712,7 @@ class YouTubeChannelResolver(
         private fun defaultHttpGet(urlStr: String): HttpFetchResult {
             var conn: HttpURLConnection? = null
             return try {
+                val isSearchResults = urlStr.contains("/results?")
                 conn = (URL(urlStr).openConnection() as HttpURLConnection).apply {
                     connectTimeout = 9_000
                     readTimeout = 12_000
@@ -691,7 +720,12 @@ class YouTubeChannelResolver(
                     requestMethod = "GET"
                     setRequestProperty(
                         "User-Agent",
-                        "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
+                        if (isSearchResults) {
+                            // Desktop UA avoids m.youtube.com redirect and returns rich channelRenderer JSON
+                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+                        } else {
+                            "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
+                        }
                     )
                     setRequestProperty("Accept-Language", "en-US,en;q=0.9")
                     // Bypass EU consent interstitial for public metadata extraction

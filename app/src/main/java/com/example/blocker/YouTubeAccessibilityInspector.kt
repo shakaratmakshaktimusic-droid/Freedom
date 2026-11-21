@@ -7,29 +7,26 @@ import com.example.domain.YouTubeClientProfile
 import com.example.domain.YouTubeStudyEngine
 
 /**
- * Ultra-lightweight, bounded single-pass Accessibility tree inspector for:
+ * Ultra-lightweight, bounded single-pass Accessibility tree inspector & in-app
+ * playback cutter for:
  *  - Official YouTube
  *  - Morphe YT
  *  - YouTube ReVanced / RVX / patched YouTube clients
  *  - Supported third-party clients (NewPipe, Tubular, PipePipe, LibreTube)
  *
- * Strictly bounded (< 120 visited nodes per pass) to keep scrolling smooth at 60 FPS.
+ * Cuts unapproved videos cleanly INSIDE YouTube (Watch collapse + bottom miniplayer ×
+ * close, Shorts -> Home tab) instead of evicting the YouTube app to Home (which would
+ * trigger Android Picture-in-Picture and let the video keep playing).
  */
 object YouTubeAccessibilityInspector {
-
-    data class FeedCardInspection(
-        val bounds: Rect,
-        val textCandidates: List<String>,
-        val isShortCard: Boolean,
-        val isLiveCard: Boolean
-    )
 
     data class YouTubeWindowSnapshot(
         val screenMode: YouTubeStudyEngine.ScreenMode,
         val activeChannelTitle: String? = null,
         val activeChannelHandle: String? = null,
         val activeVideoTitle: String? = null,
-        val visibleFeedCards: List<FeedCardInspection> = emptyList(),
+        val miniPlayerVisible: Boolean = false,
+        val miniPlayerSubtitle: String? = null,
         val allVisibleSnippets: List<String> = emptyList()
     )
 
@@ -41,6 +38,13 @@ object YouTubeAccessibilityInspector {
     private val WATCH_PLAYER_ID_TOKENS = listOf(
         "watch_player", "player_view", "next_gen_watch", "watch_while_time_bar",
         "watch_panel", "player_fragment_container", "video_player", "detail_root"
+    )
+    private val MINIPLAYER_ID_TOKENS = listOf(
+        "miniplayer", "mini_player", "floaty_bar", "floaty_close", "watch_while_miniplayer",
+        "modern_miniplayer"
+    )
+    private val MINIPLAYER_CLOSE_ID_TOKENS = listOf(
+        "miniplayer_close", "floaty_close", "modern_miniplayer_close", "close_miniplayer"
     )
     private val CHANNEL_HEADER_ID_TOKENS = listOf(
         "channel_name", "owner_text", "channel_title", "detail_uploader_text_view",
@@ -54,8 +58,7 @@ object YouTubeAccessibilityInspector {
         root: AccessibilityNodeInfo?,
         client: YouTubeClientProfile,
         screenWidth: Int,
-        screenHeight: Int,
-        collectFeedCards: Boolean
+        screenHeight: Int
     ): YouTubeWindowSnapshot {
         if (root == null) {
             return YouTubeWindowSnapshot(screenMode = YouTubeStudyEngine.ScreenMode.FEED_OR_SEARCH)
@@ -63,26 +66,23 @@ object YouTubeAccessibilityInspector {
 
         var hasShortsContainer = false
         var hasWatchPlayer = false
+        var hasMiniPlayer = false
         var hasLiveBadge = false
         var activeChannelTitle: String? = null
         var activeChannelHandle: String? = null
         var activeVideoTitle: String? = null
-        val feedCards = ArrayList<FeedCardInspection>(14)
-        val snippets = ArrayList<String>(32)
+        var miniPlayerSubtitle: String? = null
+        val snippets = ArrayList<String>(36)
 
         val queue = ArrayDeque<Pair<AccessibilityNodeInfo, Int>>()
         queue.add(root to 0)
         var visited = 0
         val bounds = Rect()
 
-        val cardMinW = (screenWidth * 0.40f).toInt()
-        val cardMinH = (screenHeight * 0.10f).toInt()
-        val cardMaxH = (screenHeight * 0.54f).toInt()
         val watchHeaderMaxY = (screenHeight * 0.68f).toInt()
-        val feedTopSafeY = (screenHeight * 0.08f).toInt()
-        val feedBottomSafeY = (screenHeight * 0.90f).toInt()
+        val miniPlayerMinY = (screenHeight * 0.65f).toInt()
 
-        while (queue.isNotEmpty() && visited < 120) {
+        while (queue.isNotEmpty() && visited < 130) {
             val (node, depth) = queue.removeFirst()
             visited++
 
@@ -90,7 +90,7 @@ object YouTubeAccessibilityInspector {
             val text = node.text?.toString()?.trim().orEmpty()
             val desc = node.contentDescription?.toString()?.trim().orEmpty()
 
-            if (snippets.size < 32) {
+            if (snippets.size < 36) {
                 if (text.length in 2..150) snippets.add(text)
                 else if (desc.length in 2..150) snippets.add(desc)
             }
@@ -103,12 +103,26 @@ object YouTubeAccessibilityInspector {
                 hasShortsContainer = true
             }
 
-            // 2. Detect Watch player container
+            // 2. Detect Watch player vs. bottom in-app Miniplayer
+            if (MINIPLAYER_ID_TOKENS.any { resId.contains(it) } ||
+                desc.contains("close miniplayer", ignoreCase = true) ||
+                desc.contains("expand miniplayer", ignoreCase = true)
+            ) {
+                node.getBoundsInScreen(bounds)
+                if (bounds.height() in 20..(screenHeight * 0.24f).toInt() && bounds.top >= miniPlayerMinY) {
+                    hasMiniPlayer = true
+                    if (miniPlayerSubtitle == null) {
+                        extractMiniPlayerChannelText(node)?.let { miniPlayerSubtitle = it }
+                    }
+                }
+            }
+
             if (!hasWatchPlayer && WATCH_PLAYER_ID_TOKENS.any { resId.contains(it) }) {
                 node.getBoundsInScreen(bounds)
-                // Ignore minimized mini-player bar at bottom of screen
-                if (bounds.height() > (screenHeight * 0.16f).toInt()) {
+                if (bounds.height() > (screenHeight * 0.18f).toInt()) {
                     hasWatchPlayer = true
+                } else if (bounds.height() in 28..(screenHeight * 0.18f).toInt() && bounds.top >= miniPlayerMinY) {
+                    hasMiniPlayer = true
                 }
             }
 
@@ -157,41 +171,6 @@ object YouTubeAccessibilityInspector {
                 }
             }
 
-            // 5. Collect visible feed / search / recommendation cards for Regain-style masking
-            if (collectFeedCards &&
-                client.supportsFeedCardMasking &&
-                !hasShortsContainer &&
-                feedCards.size < 12 &&
-                depth >= 3 &&
-                node.isClickable
-            ) {
-                node.getBoundsInScreen(bounds)
-                val insideFeedViewport = bounds.top >= feedTopSafeY &&
-                    bounds.bottom <= feedBottomSafeY &&
-                    bounds.width() >= cardMinW &&
-                    bounds.height() in cardMinH..cardMaxH
-                // On watch screen, only mask recommendation cards BELOW the video player
-                val belowPlayerIfWatching = !hasWatchPlayer || bounds.top > (screenHeight * 0.42f).toInt()
-                if (insideFeedViewport && belowPlayerIfWatching) {
-                    val cardTexts = extractCardTexts(node)
-                    if (looksLikeVideoCard(cardTexts, desc)) {
-                        val joined = cardTexts.joinToString(" ").lowercase()
-                        val isShort = joined.contains("shorts") || joined.contains("#shorts")
-                        val isLive = joined.contains("watching") || joined.contains(" live ") || joined.endsWith(" live")
-                        feedCards.add(
-                            FeedCardInspection(
-                                bounds = Rect(bounds),
-                                textCandidates = cardTexts,
-                                isShortCard = isShort,
-                                isLiveCard = isLive
-                            )
-                        )
-                        // Don't descend further inside a captured card
-                        continue
-                    }
-                }
-            }
-
             if (depth < 9) {
                 val count = node.childCount.coerceAtMost(10)
                 for (i in 0 until count) {
@@ -207,7 +186,6 @@ object YouTubeAccessibilityInspector {
                     s.equals("Subscribed", ignoreCase = true) ||
                     s.startsWith("Comments", ignoreCase = true) ||
                     s.contains("Pause video", ignoreCase = true) ||
-                    s.contains("Play video", ignoreCase = true) ||
                     s.contains("Enter fullscreen", ignoreCase = true)
             }
             if (hasWatchControls) {
@@ -215,7 +193,7 @@ object YouTubeAccessibilityInspector {
             }
         }
 
-        // If watch player is open and channel title wasn't matched by viewId, look for the text right next to "Subscribe"
+        // If watch player is open and channel title wasn't matched by viewId, inspect text right before "Subscribe"
         if (hasWatchPlayer && activeChannelTitle == null && activeChannelHandle == null) {
             val subIdx = snippets.indexOfFirst {
                 it.equals("Subscribe", ignoreCase = true) || it.equals("Subscribed", ignoreCase = true)
@@ -237,21 +215,206 @@ object YouTubeAccessibilityInspector {
             }
         }
 
+        val resolvedChannelTitle = activeChannelTitle ?: if (!hasWatchPlayer && hasMiniPlayer) miniPlayerSubtitle else null
+
         val screenMode = when {
             hasShortsContainer -> YouTubeStudyEngine.ScreenMode.SHORTS_PLAYER
             hasWatchPlayer && hasLiveBadge -> YouTubeStudyEngine.ScreenMode.LIVE_PLAYER
             hasWatchPlayer -> YouTubeStudyEngine.ScreenMode.WATCH_PLAYER
+            hasMiniPlayer -> YouTubeStudyEngine.ScreenMode.MINI_PLAYER
             else -> YouTubeStudyEngine.ScreenMode.FEED_OR_SEARCH
         }
 
         return YouTubeWindowSnapshot(
             screenMode = screenMode,
-            activeChannelTitle = activeChannelTitle,
+            activeChannelTitle = resolvedChannelTitle,
             activeChannelHandle = activeChannelHandle,
             activeVideoTitle = activeVideoTitle,
-            visibleFeedCards = feedCards,
+            miniPlayerVisible = hasMiniPlayer,
+            miniPlayerSubtitle = miniPlayerSubtitle,
             allVisibleSnippets = snippets
         )
+    }
+
+    /**
+     * Attempts to click YouTube's Pause button on the active player or miniplayer so audio
+     * stops immediately before collapsing/closing.
+     */
+    fun tryPauseActiveVideo(root: AccessibilityNodeInfo?): Boolean {
+        if (root == null) return false
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(root)
+        var visited = 0
+        while (queue.isNotEmpty() && visited < 110) {
+            val node = queue.removeFirst()
+            visited++
+            val desc = node.contentDescription?.toString()?.lowercase().orEmpty()
+            val text = node.text?.toString()?.lowercase().orEmpty()
+            if (desc == "pause video" || desc == "pause" || desc.startsWith("pause ") || text == "pause") {
+                if (clickNodeOrParent(node)) return true
+            }
+            for (i in 0 until node.childCount.coerceAtMost(10)) {
+                node.getChild(i)?.let { queue.add(it) }
+            }
+        }
+        return false
+    }
+
+    /**
+     * Finds and clicks YouTube's in-app bottom miniplayer Close ("×") button so playback
+     * stops completely inside YouTube without exiting the app into PiP.
+     */
+    fun tryCloseMiniPlayer(
+        root: AccessibilityNodeInfo?,
+        screenWidth: Int,
+        screenHeight: Int
+    ): Boolean {
+        if (root == null) return false
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(root)
+        var visited = 0
+        val bounds = Rect()
+        val miniBarTopMin = (screenHeight * 0.65f).toInt()
+        val miniBarBottomMax = (screenHeight * 0.96f).toInt()
+        var miniContainerNode: AccessibilityNodeInfo? = null
+
+        while (queue.isNotEmpty() && visited < 140) {
+            val node = queue.removeFirst()
+            visited++
+            val resId = node.viewIdResourceName?.lowercase().orEmpty()
+            val desc = node.contentDescription?.toString()?.lowercase().orEmpty()
+            val text = node.text?.toString()?.lowercase().orEmpty()
+
+            // Direct match on miniplayer close button ID or description
+            val isDirectMiniClose = MINIPLAYER_CLOSE_ID_TOKENS.any { resId.contains(it) } ||
+                desc == "close miniplayer" ||
+                desc == "dismiss miniplayer" ||
+                desc == "close player" ||
+                desc == "close video"
+
+            if (isDirectMiniClose && clickNodeOrParent(node)) {
+                return true
+            }
+
+            // Generic "Close" / "Dismiss" button positioned inside the lower miniplayer band (right half)
+            if (desc == "close" || desc == "dismiss" || text == "close" || resId.endsWith(":id/close_button")) {
+                node.getBoundsInScreen(bounds)
+                if (bounds.top >= miniBarTopMin && bounds.bottom <= miniBarBottomMax &&
+                    bounds.left >= (screenWidth * 0.65f).toInt()
+                ) {
+                    if (clickNodeOrParent(node)) return true
+                }
+            }
+
+            // Track miniplayer bar container in case its close button lacks text/desc
+            if (miniContainerNode == null && MINIPLAYER_ID_TOKENS.any { resId.contains(it) }) {
+                node.getBoundsInScreen(bounds)
+                if (bounds.top >= miniBarTopMin && bounds.height() in 36..(screenHeight * 0.22f).toInt()) {
+                    miniContainerNode = node
+                }
+            }
+
+            for (i in 0 until node.childCount.coerceAtMost(10)) {
+                node.getChild(i)?.let { queue.add(it) }
+            }
+        }
+
+        // Fallback: inside the detected miniplayer container, click the rightmost small clickable button (×)
+        miniContainerNode?.let { container ->
+            var rightmostNode: AccessibilityNodeInfo? = null
+            var maxRight = -1
+            val subQueue = ArrayDeque<AccessibilityNodeInfo>()
+            subQueue.add(container)
+            var scanned = 0
+            while (subQueue.isNotEmpty() && scanned < 30) {
+                val n = subQueue.removeFirst()
+                scanned++
+                if (n.isClickable && n !== container) {
+                    n.getBoundsInScreen(bounds)
+                    if (bounds.width() in 20..(screenWidth * 0.22f).toInt() && bounds.right > maxRight) {
+                        maxRight = bounds.right
+                        rightmostNode = n
+                    }
+                }
+                for (i in 0 until n.childCount.coerceAtMost(8)) {
+                    n.getChild(i)?.let { subQueue.add(it) }
+                }
+            }
+            if (rightmostNode != null && clickNodeOrParent(rightmostNode)) {
+                return true
+            }
+        }
+        return false
+    }
+
+    /**
+     * Exits YouTube Shorts cleanly by clicking YouTube's bottom navigation "Home" tab
+     * so Shorts stops immediately while staying inside YouTube (no app exit / no PiP).
+     */
+    fun tryNavigateShortsToHome(
+        root: AccessibilityNodeInfo?,
+        screenHeight: Int
+    ): Boolean {
+        if (root == null) return false
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(root)
+        var visited = 0
+        val bounds = Rect()
+        val bottomNavMinY = (screenHeight * 0.84f).toInt()
+
+        while (queue.isNotEmpty() && visited < 130) {
+            val node = queue.removeFirst()
+            visited++
+            val desc = node.contentDescription?.toString()?.lowercase().orEmpty()
+            val text = node.text?.toString()?.lowercase().orEmpty()
+            if (desc == "home" || text == "home" || desc.startsWith("home, tab")) {
+                node.getBoundsInScreen(bounds)
+                if (bounds.top >= bottomNavMinY) {
+                    if (clickNodeOrParent(node)) return true
+                }
+            }
+            for (i in 0 until node.childCount.coerceAtMost(10)) {
+                node.getChild(i)?.let { queue.add(it) }
+            }
+        }
+        return false
+    }
+
+    private fun clickNodeOrParent(node: AccessibilityNodeInfo): Boolean {
+        var target: AccessibilityNodeInfo? = node
+        var hops = 0
+        while (target != null && !target.isClickable && hops < 3) {
+            target = target.parent
+            hops++
+        }
+        val clickable = target ?: node
+        return runCatching {
+            clickable.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        }.getOrDefault(false)
+    }
+
+    private fun extractMiniPlayerChannelText(miniNode: AccessibilityNodeInfo): String? {
+        val stack = ArrayDeque<AccessibilityNodeInfo>()
+        stack.add(miniNode)
+        val texts = ArrayList<String>(4)
+        var scanned = 0
+        while (stack.isNotEmpty() && scanned < 20 && texts.size < 4) {
+            val n = stack.removeFirst()
+            scanned++
+            val t = n.text?.toString()?.trim().orEmpty()
+            if (t.length in 2..80 &&
+                !t.equals("Play", ignoreCase = true) &&
+                !t.equals("Pause", ignoreCase = true) &&
+                !t.equals("Close", ignoreCase = true)
+            ) {
+                texts.add(t)
+            }
+            for (i in 0 until n.childCount.coerceAtMost(6)) {
+                n.getChild(i)?.let { stack.add(it) }
+            }
+        }
+        // In YouTube's miniplayer, the second text line is the channel name (first is video title)
+        return texts.getOrNull(1) ?: texts.firstOrNull()
     }
 
     private fun extractChannelNameFromHeader(text: String, desc: String): String? {
@@ -270,40 +433,5 @@ object YouTubeAccessibilityInspector {
             if (beforeSubs.length in 2..80) return beforeSubs
         }
         return null
-    }
-
-    private fun extractCardTexts(cardNode: AccessibilityNodeInfo): List<String> {
-        val texts = ArrayList<String>(8)
-        val stack = ArrayDeque<AccessibilityNodeInfo>()
-        stack.add(cardNode)
-        var scanned = 0
-        while (stack.isNotEmpty() && texts.size < 8 && scanned < 22) {
-            val n = stack.removeFirst()
-            scanned++
-            n.text?.toString()?.trim()?.takeIf { it.length in 2..180 }?.let { texts.add(it) }
-            n.contentDescription?.toString()?.trim()?.takeIf { it.length in 2..220 }?.let { texts.add(it) }
-            for (i in 0 until n.childCount.coerceAtMost(6)) {
-                n.getChild(i)?.let { stack.add(it) }
-            }
-        }
-        return texts
-    }
-
-    private fun looksLikeVideoCard(cardTexts: List<String>, rootDesc: String): Boolean {
-        if (cardTexts.isEmpty()) return false
-        val joined = (cardTexts + rootDesc).joinToString(" ").lowercase()
-        // Exclude bottom navigation bar, top chips, and search bar items
-        if (joined.length < 10) return false
-        val hasVideoSignals = joined.contains("views") ||
-            joined.contains("ago") ||
-            joined.contains("minutes") ||
-            joined.contains("seconds") ||
-            joined.contains("watching") ||
-            joined.contains("shorts") ||
-            joined.contains("play video") ||
-            joined.contains("go to channel") ||
-            joined.contains("·") ||
-            cardTexts.size >= 2
-        return hasVideoSignals
     }
 }

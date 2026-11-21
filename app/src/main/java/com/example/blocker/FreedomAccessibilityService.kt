@@ -61,7 +61,6 @@ class FreedomAccessibilityService : AccessibilityService() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mainHandler = Handler(Looper.getMainLooper())
     private lateinit var overlayManager: FreedomOverlayManager
-    private lateinit var maskOverlayManager: ContentMaskOverlayManager
 
     @Volatile
     private var lastEnforcementKey: String = ""
@@ -80,6 +79,12 @@ class FreedomAccessibilityService : AccessibilityService() {
 
     @Volatile
     private var lastSafeSearchRedirectTimeMs: Long = 0L
+
+    @Volatile
+    private var lastApprovedYouTubePkg: String = ""
+
+    @Volatile
+    private var lastApprovedYouTubeTimeMs: Long = 0L
 
     private val inFlightVideoLookups = ConcurrentHashMap.newKeySet<String>()
 
@@ -102,7 +107,6 @@ class FreedomAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         overlayManager = FreedomOverlayManager(this)
-        maskOverlayManager = ContentMaskOverlayManager(this)
         FreedomBlockNotifier.ensureChannel(this)
         _isRunning.value = true
         instance = this
@@ -143,20 +147,14 @@ class FreedomAccessibilityService : AccessibilityService() {
         val isSessionActive = snapshot.isStillActive(nowWall, nowElapsed)
         val isStrictActive = isSessionActive && snapshot.strictMode
 
-        // Fast-exit (< 0.1 ms) when neither a focus session nor any always-on Content Protection is active
-        if (!isSessionActive && !contentConfig.anyProtectionEnabled) {
-            clearFloatingShieldAndCounters()
-            if (::maskOverlayManager.isInitialized) maskOverlayManager.clear()
-            return
-        }
-
         val displayMetrics = resources.displayMetrics
         val screenWidth = displayMetrics.widthPixels
         val screenHeight = displayMetrics.heightPixels
 
         val allWindows = runCatching { windows }.getOrNull().orEmpty()
 
-        // If NO timed focus session is active, run ONLY lightweight always-on Content Protection
+        // If NO timed focus session is active, run silent always-on SafeSearch,
+        // Multilingual Adult/Mature-Media Protection, and (when enabled) YouTube Study Mode.
         if (!isSessionActive) {
             clearFloatingShieldAndCounters()
             evaluateAlwaysOnContentProtection(
@@ -316,20 +314,16 @@ class FreedomAccessibilityService : AccessibilityService() {
         when (decision) {
             is BlockDecisionEngine.Decision.Allow -> {
                 clearFloatingShieldAndCounters()
-                if (contentConfig.anyProtectionEnabled) {
-                    evaluateAlwaysOnContentProtection(
-                        allWindows = allWindows,
-                        triggerPackage = triggerPackage,
-                        triggerClassName = triggerClassName,
-                        contentConfig = contentConfig,
-                        strictMode = isStrictActive,
-                        sessionId = snapshot.sessionId,
-                        screenWidth = screenWidth,
-                        screenHeight = screenHeight
-                    )
-                } else if (::maskOverlayManager.isInitialized) {
-                    maskOverlayManager.clear()
-                }
+                evaluateAlwaysOnContentProtection(
+                    allWindows = allWindows,
+                    triggerPackage = triggerPackage,
+                    triggerClassName = triggerClassName,
+                    contentConfig = contentConfig,
+                    strictMode = isStrictActive,
+                    sessionId = snapshot.sessionId,
+                    screenWidth = screenWidth,
+                    screenHeight = screenHeight
+                )
             }
 
             is BlockDecisionEngine.Decision.BlockApp -> {
@@ -844,11 +838,25 @@ class FreedomAccessibilityService : AccessibilityService() {
     }
 
     // =========================================================================
-    // Always-On Content Protection:
+    // Silent Always-On Backend Content Protection (ZERO Floating Card Masks!):
     //  1. Regain-style Multi-Client YouTube Study Mode (Official YT, Morphe YT, ReVanced, 3P)
-    //  2. Universal SafeSearch Enforcement Engine (Google, Bing, DDG, Yahoo, Brave, etc.)
-    //  3. In-App Adult-Content Filtering & Single-Canvas Card Masking
+    //     — Cuts unapproved videos INSIDE YouTube (Watch -> Back + Miniplayer ×, Shorts -> Home,
+    //       and PiP safety close) so YouTube never minimizes into PiP and keeps playing.
+    //  2. Silent Always-On Universal SafeSearch Enforcement (Google, Bing, DDG, Yahoo, Brave...)
+    //  3. Silent Always-On Multilingual & Mature-Media Adult Filter (Direct Back Cut, No Overlays)
     // =========================================================================
+
+    private data class ObservedAppWindow(
+        val packageName: String,
+        val root: AccessibilityNodeInfo,
+        val isPip: Boolean,
+        val bounds: Rect
+    )
+
+    private fun isRecentApprovedYouTubeWatch(pkg: String): Boolean {
+        if (pkg != lastApprovedYouTubePkg) return false
+        return (SystemClock.elapsedRealtime() - lastApprovedYouTubeTimeMs) < 90_000L
+    }
 
     private fun evaluateAlwaysOnContentProtection(
         allWindows: List<AccessibilityWindowInfo>,
@@ -861,159 +869,181 @@ class FreedomAccessibilityService : AccessibilityService() {
         screenHeight: Int
     ) {
         val container = (applicationContext as? FreedomApplication)?.container ?: return
-        val appRoots = ArrayList<Pair<String, AccessibilityNodeInfo>>(2)
+        val observedApps = ArrayList<ObservedAppWindow>(3)
 
         for (win in allWindows) {
             if (win.type != AccessibilityWindowInfo.TYPE_APPLICATION) continue
             val root = runCatching { win.root }.getOrNull() ?: continue
             val pkg = root.packageName?.toString().orEmpty()
             if (pkg.isBlank() || pkg == packageName) continue
-            appRoots.add(pkg to root)
+            val isPip = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                win.isInPictureInPictureMode
+            } else {
+                false
+            }
+            val bounds = Rect()
+            win.getBoundsInScreen(bounds)
+            observedApps.add(ObservedAppWindow(pkg, root, isPip, bounds))
         }
-        if (appRoots.isEmpty() && !triggerPackage.isNullOrBlank() && triggerPackage != packageName) {
+        if (observedApps.isEmpty() && !triggerPackage.isNullOrBlank() && triggerPackage != packageName) {
             runCatching { rootInActiveWindow }.getOrNull()?.let { r ->
-                appRoots.add(triggerPackage to r)
+                observedApps.add(ObservedAppWindow(triggerPackage, r, false, Rect(0, 0, screenWidth, screenHeight)))
             }
         }
 
         // Fast exit on Launcher / SystemUI / Freedom itself — zero overhead!
-        if (appRoots.isEmpty()) {
-            if (::maskOverlayManager.isInitialized) maskOverlayManager.clear()
-            return
-        }
+        if (observedApps.isEmpty()) return
 
         val dynamicExempt = container.installedAppsProvider.getDynamicExemptPackages()
-        val combinedMasks = ArrayList<ContentMaskOverlayManager.MaskItem>(12)
 
-        for ((pkg, root) in appRoots) {
+        for (win in observedApps) {
+            val pkg = win.packageName
+            val root = win.root
             if (pkg in dynamicExempt || pkg == "com.android.systemui") continue
 
             val appLabel = container.installedAppsProvider.getAppLabel(pkg)
 
             // -----------------------------------------------------------------
-            // A. Multi-Client YouTube Study Mode (Official YT, Morphe YT, ReVanced, 3P)
+            // A. Multi-Client YouTube Study Mode + In-App Adult/Mature Filter
+            //    (Official YouTube, Morphe YT, ReVanced, Third-Party Clients)
             // -----------------------------------------------------------------
             val ytClient = YouTubeClientRegistry.identifyClient(pkg, appLabel)
-            if (ytClient != null && contentConfig.youtubeStudyModeEnabled) {
-                val clientDecision = YouTubeStudyEngine.evaluateClientCompatibility(ytClient, strictMode)
-                if (clientDecision is YouTubeStudyEngine.StudyDecision.BlockPlayback) {
-                    if (::maskOverlayManager.isInitialized) maskOverlayManager.clear()
-                    enforceContentProtectionEviction(
-                        blockedPackage = pkg,
-                        navigateHome = clientDecision.navigateHome,
-                        reason = clientDecision.reason,
-                        notificationText = clientDecision.notificationText,
+            if (ytClient != null) {
+                // A0. PiP Leak Safety Guard: if a YouTube client is floating in PiP while Study Mode
+                // is ON and the current video was NOT verified as an approved channel, close PiP!
+                if (win.isPip && contentConfig.youtubeStudyModeEnabled && !isRecentApprovedYouTubeWatch(pkg)) {
+                    closeYouTubePipWindow(
+                        pkg = pkg,
+                        targetRoot = root,
+                        targetBounds = win.bounds,
+                        allWindows = allWindows,
+                        screenWidth = screenWidth,
+                        screenHeight = screenHeight,
                         sessionId = sessionId
                     )
                     return
                 }
 
-                val approved = container.fastStore.readApprovedChannelsSnapshot()
                 val ytSnapshot = YouTubeAccessibilityInspector.inspect(
                     root = root,
                     client = ytClient,
                     screenWidth = screenWidth,
-                    screenHeight = screenHeight,
-                    collectFeedCards = contentConfig.youtubeMaskFeedCards && ytClient.supportsFeedCardMasking
+                    screenHeight = screenHeight
                 )
 
-                val playbackDecision = YouTubeStudyEngine.evaluateActivePlayback(
-                    screenMode = ytSnapshot.screenMode,
-                    detectedChannelId = null,
-                    detectedHandle = ytSnapshot.activeChannelHandle,
-                    detectedChannelTitle = ytSnapshot.activeChannelTitle,
-                    approved = approved,
-                    config = contentConfig,
-                    strictMode = strictMode
-                )
+                var isApprovedYouTubeChannel = false
 
-                if (playbackDecision is YouTubeStudyEngine.StudyDecision.BlockPlayback) {
-                    if (::maskOverlayManager.isInitialized) maskOverlayManager.clear()
-                    enforceContentProtectionEviction(
-                        blockedPackage = pkg,
-                        navigateHome = playbackDecision.navigateHome,
-                        reason = playbackDecision.reason,
-                        notificationText = playbackDecision.notificationText,
-                        sessionId = sessionId
-                    )
-                    return
-                }
-
-                // In-app adult title/metadata protection inside YouTube & Morphe YT
-                if (contentConfig.inAppAdultFilterEnabled) {
-                    val adultActive = InAppAdultFilterEngine.evaluateActiveContent(
-                        urlOrQuery = ytSnapshot.activeVideoTitle,
-                        visibleSnippets = ytSnapshot.allVisibleSnippets
-                    )
-                    if (adultActive.isFlagged) {
-                        if (::maskOverlayManager.isInitialized) maskOverlayManager.clear()
-                        enforceContentProtectionEviction(
+                if (contentConfig.youtubeStudyModeEnabled) {
+                    val clientDecision = YouTubeStudyEngine.evaluateClientCompatibility(ytClient, strictMode)
+                    if (clientDecision is YouTubeStudyEngine.StudyDecision.BlockPlayback) {
+                        enforceYouTubeInAppVideoCut(
                             blockedPackage = pkg,
-                            navigateHome = false,
-                            reason = "Inappropriate video content filtered in ${ytClient.displayName}",
-                            notificationText = "Inappropriate content filtered by Freedom.",
-                            sessionId = sessionId
+                            root = root,
+                            cutAction = clientDecision.cutAction,
+                            reason = clientDecision.reason,
+                            notificationText = clientDecision.notificationText,
+                            sessionId = sessionId,
+                            screenWidth = screenWidth,
+                            screenHeight = screenHeight
                         )
                         return
                     }
-                }
 
-                // Regain-style Feed / Search / Recommendation Card Masking:
-                // Leave approved-channel cards completely open; mask ONLY unapproved cards!
-                if (contentConfig.youtubeMaskFeedCards && ytSnapshot.visibleFeedCards.isNotEmpty()) {
-                    for (card in ytSnapshot.visibleFeedCards) {
-                        val isAdultCard = contentConfig.inAppAdultFilterEnabled &&
-                            InAppAdultFilterEngine.evaluateCardText(card.textCandidates).isFlagged
-                        if (isAdultCard) {
-                            combinedMasks.add(
-                                ContentMaskOverlayManager.MaskItem(
-                                    rect = card.bounds,
-                                    label = "Explicit Content Filtered",
-                                    isAdultShield = true
-                                )
-                            )
-                        } else if (YouTubeStudyEngine.shouldMaskFeedCard(
-                                cardTextCandidates = card.textCandidates,
-                                isShortCard = card.isShortCard,
-                                isLiveCard = card.isLiveCard,
-                                approved = approved,
-                                config = contentConfig
+                    val approved = container.fastStore.readApprovedChannelsSnapshot()
+                    val playbackDecision = YouTubeStudyEngine.evaluateActivePlayback(
+                        screenMode = ytSnapshot.screenMode,
+                        detectedChannelId = null,
+                        detectedHandle = ytSnapshot.activeChannelHandle,
+                        detectedChannelTitle = ytSnapshot.activeChannelTitle,
+                        approved = approved,
+                        config = contentConfig,
+                        strictMode = strictMode,
+                        lastApprovedWatchActive = isRecentApprovedYouTubeWatch(pkg)
+                    )
+
+                    if (playbackDecision is YouTubeStudyEngine.StudyDecision.BlockPlayback) {
+                        if (lastApprovedYouTubePkg == pkg) {
+                            lastApprovedYouTubePkg = ""
+                        }
+                        enforceYouTubeInAppVideoCut(
+                            blockedPackage = pkg,
+                            root = root,
+                            cutAction = playbackDecision.cutAction,
+                            reason = playbackDecision.reason,
+                            notificationText = playbackDecision.notificationText,
+                            sessionId = sessionId,
+                            screenWidth = screenWidth,
+                            screenHeight = screenHeight
+                        )
+                        return
+                    }
+
+                    // Mark approved channel playback so miniplayer/PiP & spiritual recovery talks stay smooth
+                    if (ytSnapshot.screenMode == YouTubeStudyEngine.ScreenMode.WATCH_PLAYER ||
+                        ytSnapshot.screenMode == YouTubeStudyEngine.ScreenMode.LIVE_PLAYER ||
+                        ytSnapshot.screenMode == YouTubeStudyEngine.ScreenMode.SHORTS_PLAYER
+                    ) {
+                        if (approved.matchesAttribution(
+                                channelId = null,
+                                handle = ytSnapshot.activeChannelHandle,
+                                channelTitle = ytSnapshot.activeChannelTitle
                             )
                         ) {
-                            combinedMasks.add(
-                                ContentMaskOverlayManager.MaskItem(
-                                    rect = card.bounds,
-                                    label = when {
-                                        card.isShortCard && !contentConfig.youtubeAllowShortsFromApproved -> "Shorts Hidden"
-                                        card.isLiveCard && !contentConfig.youtubeAllowLiveFromApproved -> "Live Hidden"
-                                        else -> "Channel Not Approved"
-                                    },
-                                    isAdultShield = false
-                                )
-                            )
+                            isApprovedYouTubeChannel = true
+                            lastApprovedYouTubePkg = pkg
+                            lastApprovedYouTubeTimeMs = SystemClock.elapsedRealtime()
                         }
                     }
+                }
+
+                // Silent Always-On Adult / Mature-Media Protection inside YouTube & Morphe YT
+                // (Skipped for channels the user explicitly verified & approved in Study Mode)
+                val adultActive = InAppAdultFilterEngine.evaluateActiveContent(
+                    urlOrQuery = ytSnapshot.activeVideoTitle,
+                    visibleSnippets = ytSnapshot.allVisibleSnippets,
+                    isApprovedYouTubeChannel = isApprovedYouTubeChannel
+                )
+                if (adultActive.isFlagged) {
+                    val cutAction = when (ytSnapshot.screenMode) {
+                        YouTubeStudyEngine.ScreenMode.SHORTS_PLAYER ->
+                            YouTubeStudyEngine.PlaybackCutAction.EXIT_SHORTS_TO_HOME
+                        YouTubeStudyEngine.ScreenMode.MINI_PLAYER ->
+                            YouTubeStudyEngine.PlaybackCutAction.CLOSE_MINIPLAYER_ONLY
+                        YouTubeStudyEngine.ScreenMode.WATCH_PLAYER,
+                        YouTubeStudyEngine.ScreenMode.LIVE_PLAYER ->
+                            YouTubeStudyEngine.PlaybackCutAction.CLOSE_WATCH_AND_MINIPLAYER
+                        else ->
+                            YouTubeStudyEngine.PlaybackCutAction.EXIT_SHORTS_TO_HOME
+                    }
+                    enforceYouTubeInAppVideoCut(
+                        blockedPackage = pkg,
+                        root = root,
+                        cutAction = cutAction,
+                        reason = "Inappropriate or mature content filtered in ${ytClient.displayName}",
+                        notificationText = "Inappropriate content filtered by Freedom.",
+                        sessionId = sessionId,
+                        screenWidth = screenWidth,
+                        screenHeight = screenHeight
+                    )
+                    return
                 }
                 continue
             }
 
             // -----------------------------------------------------------------
             // B. Browsers, Embedded WebViews, Google Search & Google Images
+            //    (Silent Always-On SafeSearch + Direct Adult/Mature Cut — ZERO Floating Masks!)
             // -----------------------------------------------------------------
             val isBrowserOrWeb = BrowserUrlExtractor.isBrowserPackage(pkg) ||
                 pkg == "com.google.android.googlequicksearchbox"
             if (isBrowserOrWeb) {
-                // Optional Strict Mode safeguard for Google App's native image/discover views
-                if (pkg == "com.google.android.googlequicksearchbox" &&
-                    strictMode &&
-                    contentConfig.blockUnfilterableAppsInStrictMode
-                ) {
-                    if (::maskOverlayManager.isInitialized) maskOverlayManager.clear()
+                // Automatic Strict Mode safeguard for Google App's native unfilterable views
+                if (pkg == "com.google.android.googlequicksearchbox" && strictMode) {
                     enforceContentProtectionEviction(
                         blockedPackage = pkg,
                         navigateHome = true,
                         reason = "Unfilterable search app blocked during Strict Mode",
-                        notificationText = "Google App blocked in Strict Mode — use a supported browser with SafeSearch.",
+                        notificationText = "Google App blocked in Strict Mode — use a browser with SafeSearch.",
                         sessionId = sessionId
                     )
                     return
@@ -1023,7 +1053,7 @@ class FreedomAccessibilityService : AccessibilityService() {
                 val webInfo = BrowserUrlExtractor.inspectWindow(root, pkg, classForWindow)
                 val rawUrl = webInfo.rawUrlWithQuery ?: webInfo.extractedFullUrl
 
-                // B1. Direct YouTube Links in Browsers / Custom Tabs
+                // B1. Direct YouTube Links in Browsers / Custom Tabs (when Study Mode is ON)
                 if (contentConfig.youtubeStudyModeEnabled && !rawUrl.isNullOrBlank()) {
                     val approved = container.fastStore.readApprovedChannelsSnapshot()
                     when (val ytUrlDecision = YouTubeStudyEngine.evaluateDirectYouTubeUrl(
@@ -1033,7 +1063,6 @@ class FreedomAccessibilityService : AccessibilityService() {
                         strictMode = strictMode
                     )) {
                         is YouTubeStudyEngine.StudyDecision.BlockPlayback -> {
-                            if (::maskOverlayManager.isInitialized) maskOverlayManager.clear()
                             enforceContentProtectionEviction(
                                 blockedPackage = pkg,
                                 navigateHome = false,
@@ -1047,7 +1076,6 @@ class FreedomAccessibilityService : AccessibilityService() {
                         is YouTubeStudyEngine.StudyDecision.NeedsVideoChannelVerification -> {
                             val vid = ytUrlDecision.videoId
                             if (strictMode) {
-                                // Fail-closed during Strict Mode while verifying permanent channel ID
                                 enforceContentProtectionEviction(
                                     blockedPackage = pkg,
                                     navigateHome = false,
@@ -1075,9 +1103,9 @@ class FreedomAccessibilityService : AccessibilityService() {
                     }
                 }
 
-                // B2. Dedicated Universal SafeSearch Engine
+                // B2. Silent Always-On Universal SafeSearch Engine
                 var activeSearchQuery: String? = null
-                if (contentConfig.safeSearchEnabled && !rawUrl.isNullOrBlank()) {
+                if (!rawUrl.isNullOrBlank()) {
                     val safeDecision = SafeSearchEngine.evaluateUrl(
                         rawUrl = rawUrl,
                         config = contentConfig,
@@ -1097,7 +1125,6 @@ class FreedomAccessibilityService : AccessibilityService() {
                         }
 
                         is SafeSearchEngine.Decision.BlockSettingsTamper -> {
-                            if (::maskOverlayManager.isInitialized) maskOverlayManager.clear()
                             enforceContentProtectionEviction(
                                 blockedPackage = pkg,
                                 navigateHome = false,
@@ -1109,7 +1136,6 @@ class FreedomAccessibilityService : AccessibilityService() {
                         }
 
                         is SafeSearchEngine.Decision.BlockImageSearch -> {
-                            if (::maskOverlayManager.isInitialized) maskOverlayManager.clear()
                             enforceContentProtectionEviction(
                                 blockedPackage = pkg,
                                 navigateHome = false,
@@ -1121,7 +1147,6 @@ class FreedomAccessibilityService : AccessibilityService() {
                         }
 
                         is SafeSearchEngine.Decision.BlockUnverifiedSearchEngine -> {
-                            if (::maskOverlayManager.isInitialized) maskOverlayManager.clear()
                             enforceContentProtectionEviction(
                                 blockedPackage = pkg,
                                 navigateHome = false,
@@ -1148,7 +1173,6 @@ class FreedomAccessibilityService : AccessibilityService() {
                                 strictMode = true
                             )
                         ) {
-                            if (::maskOverlayManager.isInitialized) maskOverlayManager.clear()
                             enforceContentProtectionEviction(
                                 blockedPackage = pkg,
                                 navigateHome = false,
@@ -1161,63 +1185,43 @@ class FreedomAccessibilityService : AccessibilityService() {
                     }
                 }
 
-                // B3. In-App Adult-Content Filtering (Google Search, Google Images, Browsers)
-                if (contentConfig.inAppAdultFilterEnabled) {
-                    val queryCheck = InAppAdultFilterEngine.evaluateQueryOrUrl(activeSearchQuery ?: rawUrl)
-                    if (queryCheck.isFlagged) {
-                        if (::maskOverlayManager.isInitialized) maskOverlayManager.clear()
-                        enforceContentProtectionEviction(
-                            blockedPackage = pkg,
-                            navigateHome = false,
-                            reason = "Explicit search query or URL filtered",
-                            notificationText = "Inappropriate content filtered by Freedom.",
-                            sessionId = sessionId
-                        )
-                        return
-                    }
-
-                    // Pre-interaction card covering for flagged search results & image labels
-                    val visibleCards = BrowserUrlExtractor.collectBoundedVisibleCards(
-                        root = root,
-                        screenWidth = screenWidth,
-                        screenHeight = screenHeight,
-                        maxCards = 14
+                // B3. Silent Always-On Multilingual & Mature-Media Adult Filter (Direct Back Cut — Zero Overlays!)
+                val queryCheck = InAppAdultFilterEngine.evaluateQueryOrUrl(activeSearchQuery ?: rawUrl)
+                if (queryCheck.isFlagged) {
+                    enforceContentProtectionEviction(
+                        blockedPackage = pkg,
+                        navigateHome = false,
+                        reason = "Explicit search query or URL filtered",
+                        notificationText = "Inappropriate search filtered by Freedom.",
+                        sessionId = sessionId
                     )
-                    var flaggedCardCount = 0
-                    for (card in visibleCards) {
-                        if (InAppAdultFilterEngine.evaluateCardText(card.snippets).isFlagged) {
-                            flaggedCardCount++
-                            combinedMasks.add(
-                                ContentMaskOverlayManager.MaskItem(
-                                    rect = card.bounds,
-                                    label = "Content Filtered",
-                                    isAdultShield = true
-                                )
-                            )
-                        }
-                    }
-                    // If multiple explicit cards dominate the page, navigate Back cleanly as well
-                    if (flaggedCardCount >= 3) {
-                        if (::maskOverlayManager.isInitialized) maskOverlayManager.clear()
-                        enforceContentProtectionEviction(
-                            blockedPackage = pkg,
-                            navigateHome = false,
-                            reason = "Explicit search results page filtered",
-                            notificationText = "Inappropriate results filtered by Freedom.",
-                            sessionId = sessionId
-                        )
-                        return
-                    }
+                    return
                 }
-            } else if (contentConfig.inAppAdultFilterEnabled) {
-                // C. General inspectable third-party apps (social/news/readers/embedded search)
+
+                // Inspect visible page / search-result snippets directly (NO floating overlay masks!)
+                val pageSnippets = BrowserUrlExtractor.collectBoundedPageSnippets(root, maxSnippets = 28)
+                val pageCheck = InAppAdultFilterEngine.evaluateActiveContent(
+                    urlOrQuery = activeSearchQuery ?: rawUrl,
+                    visibleSnippets = pageSnippets
+                )
+                if (pageCheck.isFlagged) {
+                    enforceContentProtectionEviction(
+                        blockedPackage = pkg,
+                        navigateHome = false,
+                        reason = "Inappropriate search results or page filtered",
+                        notificationText = "Inappropriate content filtered by Freedom.",
+                        sessionId = sessionId
+                    )
+                    return
+                }
+            } else {
+                // C. Silent Always-On Filtering for Other Inspectable Third-Party Apps
                 val snippets = BrowserUrlExtractor.collectBoundedPageSnippets(root, maxSnippets = 24)
                 val res = InAppAdultFilterEngine.evaluateActiveContent(
                     urlOrQuery = null,
                     visibleSnippets = snippets
                 )
                 if (res.isFlagged) {
-                    if (::maskOverlayManager.isInitialized) maskOverlayManager.clear()
                     enforceContentProtectionEviction(
                         blockedPackage = pkg,
                         navigateHome = false,
@@ -1229,14 +1233,149 @@ class FreedomAccessibilityService : AccessibilityService() {
                 }
             }
         }
+    }
 
-        // Render or clear single-canvas card masks in-place (zero flicker)
-        if (::maskOverlayManager.isInitialized) {
-            if (combinedMasks.isNotEmpty()) {
-                maskOverlayManager.updateMasks(combinedMasks)
-            } else {
-                maskOverlayManager.clear()
+    /**
+     * Cuts playback INSIDE YouTube / Morphe YT / ReVanced without exiting YouTube into Android PiP:
+     *  - Watch/Live: Pause -> Back (collapses to miniplayer) -> multi-pass Miniplayer Close (×).
+     *  - Miniplayer: Immediately clicks Miniplayer Close (×).
+     *  - Shorts: Clicks bottom Home tab (or Back if unavailable) while keeping YouTube open.
+     *  - Unverifiable 3P Client (Strict Mode): Evicts app to Home.
+     */
+    private fun enforceYouTubeInAppVideoCut(
+        blockedPackage: String,
+        root: AccessibilityNodeInfo?,
+        cutAction: YouTubeStudyEngine.PlaybackCutAction,
+        reason: String,
+        notificationText: String,
+        sessionId: Long,
+        screenWidth: Int,
+        screenHeight: Int
+    ) {
+        val key = "ytcut:$blockedPackage:${cutAction.name}:$reason"
+        if (shouldThrottle(key, 650L)) return
+
+        when (cutAction) {
+            YouTubeStudyEngine.PlaybackCutAction.CLOSE_WATCH_AND_MINIPLAYER -> {
+                // 1. Pause immediately if Pause control is accessible
+                YouTubeAccessibilityInspector.tryPauseActiveVideo(root)
+                // 2. Collapse watch player into YouTube's bottom miniplayer (keeps YouTube open -> NO PiP!)
+                performGlobalAction(GLOBAL_ACTION_BACK)
+                // 3. Follow-up passes to immediately close the collapsed bottom miniplayer (×)
+                scheduleMiniPlayerClosePasses(blockedPackage, screenWidth, screenHeight)
             }
+
+            YouTubeStudyEngine.PlaybackCutAction.CLOSE_MINIPLAYER_ONLY -> {
+                val closed = YouTubeAccessibilityInspector.tryCloseMiniPlayer(root, screenWidth, screenHeight)
+                if (!closed) {
+                    YouTubeAccessibilityInspector.tryPauseActiveVideo(root)
+                    scheduleMiniPlayerClosePasses(blockedPackage, screenWidth, screenHeight)
+                }
+            }
+
+            YouTubeStudyEngine.PlaybackCutAction.EXIT_SHORTS_TO_HOME -> {
+                val navigatedHomeTab = YouTubeAccessibilityInspector.tryNavigateShortsToHome(root, screenHeight)
+                if (!navigatedHomeTab) {
+                    performGlobalAction(GLOBAL_ACTION_BACK)
+                }
+            }
+
+            YouTubeStudyEngine.PlaybackCutAction.CLOSE_PIP_WINDOW -> {
+                // Handled directly by closeYouTubePipWindow
+                performGlobalAction(GLOBAL_ACTION_BACK)
+            }
+
+            YouTubeStudyEngine.PlaybackCutAction.EVICT_CLIENT_HOME -> {
+                performGlobalAction(GLOBAL_ACTION_HOME)
+                scheduleBackgroundProcessKill(blockedPackage)
+            }
+        }
+
+        FreedomBlockNotifier.showBlockedAlert(
+            context = this,
+            message = notificationText
+        )
+
+        val container = (applicationContext as? FreedomApplication)?.container ?: return
+        val appLabel = container.installedAppsProvider.getAppLabel(blockedPackage)
+        serviceScope.launch {
+            container.repository.recordBlockEvent(
+                sessionId = sessionId,
+                packageName = blockedPackage,
+                appLabel = appLabel,
+                reason = reason
+            )
+        }
+    }
+
+    /**
+     * Rapidly clicks YouTube's bottom miniplayer Close ("×") button right after collapsing
+     * an unapproved Watch player so video & audio stop completely inside YouTube.
+     */
+    private fun scheduleMiniPlayerClosePasses(
+        ytPackage: String,
+        screenWidth: Int,
+        screenHeight: Int
+    ) {
+        val delays = longArrayOf(180L, 420L, 760L)
+        for (delayMs in delays) {
+            mainHandler.postDelayed({
+                val activeRoot = runCatching { rootInActiveWindow }.getOrNull() ?: return@postDelayed
+                if (activeRoot.packageName?.toString() != ytPackage) return@postDelayed
+                val closed = YouTubeAccessibilityInspector.tryCloseMiniPlayer(activeRoot, screenWidth, screenHeight)
+                if (!closed) {
+                    YouTubeAccessibilityInspector.tryPauseActiveVideo(activeRoot)
+                }
+            }, delayMs)
+        }
+    }
+
+    /**
+     * Safety net: if a YouTube client enters Picture-in-Picture with an unapproved video,
+     * immediately dismisses/closes the PiP window so playback cannot continue in the corner.
+     */
+    private fun closeYouTubePipWindow(
+        pkg: String,
+        targetRoot: AccessibilityNodeInfo?,
+        targetBounds: Rect,
+        allWindows: List<AccessibilityWindowInfo>,
+        screenWidth: Int,
+        screenHeight: Int,
+        sessionId: Long
+    ) {
+        val key = "ytpip:$pkg"
+        if (shouldThrottle(key, 700L)) return
+
+        val clickedClose = attemptCloseFloatingOrPipWindow(
+            targetRoot = targetRoot,
+            targetBounds = targetBounds,
+            allWindows = allWindows
+        )
+        if (!clickedClose && targetBounds.width() > 0 && targetBounds.height() > 0) {
+            // Drag PiP window cleanly down to Android's bottom-center Dismiss ("×") target
+            dispatchDragGesture(
+                startX = targetBounds.exactCenterX().coerceIn(8f, screenWidth - 8f),
+                startY = targetBounds.exactCenterY().coerceIn(8f, screenHeight - 8f),
+                endX = screenWidth * 0.5f,
+                endY = screenHeight * 0.92f,
+                durationMs = 260L
+            )
+        }
+
+        FreedomBlockNotifier.showBlockedAlert(
+            context = this,
+            message = "Unapproved YouTube PiP playback stopped by Freedom."
+        )
+
+        val container = (applicationContext as? FreedomApplication)?.container ?: return
+        val appLabel = container.installedAppsProvider.getAppLabel(pkg)
+        serviceScope.launch {
+            container.repository.recordBlockEvent(
+                sessionId = sessionId,
+                packageName = pkg,
+                appLabel = appLabel,
+                reason = "Unapproved YouTube PiP stopped"
+            )
         }
     }
 
@@ -1290,8 +1429,8 @@ class FreedomAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * Clean eviction for YouTube Study Mode, SafeSearch tampering, and In-App Adult Protection.
-     * Never logs URLs, search queries, or explicit titles.
+     * Clean eviction for SafeSearch tampering, browser YouTube links, and In-App Adult Protection.
+     * Never logs URLs, search queries, or explicit titles, and never attaches a floating mask overlay.
      */
     private fun enforceContentProtectionEviction(
         blockedPackage: String,
@@ -1334,9 +1473,6 @@ class FreedomAccessibilityService : AccessibilityService() {
         mainHandler.removeCallbacksAndMessages(null)
         if (::overlayManager.isInitialized) {
             overlayManager.dismiss()
-        }
-        if (::maskOverlayManager.isInitialized) {
-            maskOverlayManager.clear()
         }
         _isRunning.value = false
         if (instance === this) instance = null

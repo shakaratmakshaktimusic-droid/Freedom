@@ -376,27 +376,22 @@ private fun BlocklistListView(
                 }
             }
 
-            // Always-on Content Protection (YouTube Study Mode, Universal SafeSearch, In-App Adult Filter)
-            item(key = "blocklists_content_protection") {
-                val cp = uiState.contentProtection
-                val enabledCount = listOf(
-                    cp.youtubeStudyModeEnabled,
-                    cp.safeSearchEnabled,
-                    cp.inAppAdultFilterEnabled
-                ).count { it }
+            // YouTube Study Mode (SafeSearch & Adult Protection run silently in backend)
+            item(key = "blocklists_youtube_study") {
+                val studyOn = uiState.contentProtection.youtubeStudyModeEnabled
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    text = "Content Protection",
+                    text = "YouTube Study Mode",
                     style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
                     color = g.textPrimary
                 )
                 Spacer(Modifier.height(8.dp))
                 GlassCard(contentPadding = PaddingValues(0.dp)) {
                     GlassGroupedRow(
-                        title = "YouTube Study Mode, SafeSearch & Adult Filter",
-                        subtitle = "${uiState.approvedYouTubeChannels.size} approved channels · ${uiState.safeSearchProviderRules.size} search engines · Always-on protection",
+                        title = "Approved YouTube Channels",
+                        subtitle = "${uiState.approvedYouTubeChannels.size} verified channels · Search & add channels directly",
                         leadingIcon = Icons.Rounded.Shield,
-                        trailingText = if (enabledCount > 0) "$enabledCount/3 On" else "Off",
+                        trailingText = if (studyOn) "On" else "Off",
                         onClick = onOpenContentProtection,
                         modifier = Modifier.testTag("blocklists_open_content_protection_row")
                     )

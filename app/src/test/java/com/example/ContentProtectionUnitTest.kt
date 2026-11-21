@@ -341,23 +341,184 @@ class ContentProtectionUnitTest {
         assertTrue(unknownEngineBlocked is SafeSearchEngine.Decision.BlockUnverifiedSearchEngine)
     }
 
+    @Test
+    fun youtubeStudyMode_nonPipInAppCutActionsForWatchMiniplayerAndShorts() {
+        // Watch player from unapproved channel -> CLOSE_WATCH_AND_MINIPLAYER (never GLOBAL_ACTION_HOME)
+        val blockedWatch = YouTubeStudyEngine.evaluateActivePlayback(
+            screenMode = YouTubeStudyEngine.ScreenMode.WATCH_PLAYER,
+            detectedChannelId = null,
+            detectedHandle = "@distraction",
+            detectedChannelTitle = "Distraction TV",
+            approved = approvedSnapshot,
+            config = studyConfig,
+            strictMode = true
+        )
+        assertTrue(blockedWatch is YouTubeStudyEngine.StudyDecision.BlockPlayback)
+        assertEquals(
+            YouTubeStudyEngine.PlaybackCutAction.CLOSE_WATCH_AND_MINIPLAYER,
+            (blockedWatch as YouTubeStudyEngine.StudyDecision.BlockPlayback).cutAction
+        )
+        assertFalse(blockedWatch.navigateHome)
+
+        // Unapproved video lingering in bottom Miniplayer -> CLOSE_MINIPLAYER_ONLY
+        val blockedMini = YouTubeStudyEngine.evaluateActivePlayback(
+            screenMode = YouTubeStudyEngine.ScreenMode.MINI_PLAYER,
+            detectedChannelId = null,
+            detectedHandle = null,
+            detectedChannelTitle = "Distraction TV",
+            approved = approvedSnapshot,
+            config = studyConfig,
+            strictMode = false,
+            lastApprovedWatchActive = false
+        )
+        assertTrue(blockedMini is YouTubeStudyEngine.StudyDecision.BlockPlayback)
+        assertEquals(
+            YouTubeStudyEngine.PlaybackCutAction.CLOSE_MINIPLAYER_ONLY,
+            (blockedMini as YouTubeStudyEngine.StudyDecision.BlockPlayback).cutAction
+        )
+
+        // Approved video minimized to bottom Miniplayer -> Allow
+        val allowedMini = YouTubeStudyEngine.evaluateActivePlayback(
+            screenMode = YouTubeStudyEngine.ScreenMode.MINI_PLAYER,
+            detectedChannelId = null,
+            detectedHandle = null,
+            detectedChannelTitle = null,
+            approved = approvedSnapshot,
+            config = studyConfig,
+            strictMode = true,
+            lastApprovedWatchActive = true
+        )
+        assertTrue(allowedMini is YouTubeStudyEngine.StudyDecision.Allow)
+
+        // Shorts player -> EXIT_SHORTS_TO_HOME (never exits YouTube into PiP)
+        val blockedShort = YouTubeStudyEngine.evaluateActivePlayback(
+            screenMode = YouTubeStudyEngine.ScreenMode.SHORTS_PLAYER,
+            detectedChannelId = null,
+            detectedHandle = "@3Blue1Brown",
+            detectedChannelTitle = "3Blue1Brown",
+            approved = approvedSnapshot,
+            config = studyConfig,
+            strictMode = true
+        )
+        assertTrue(blockedShort is YouTubeStudyEngine.StudyDecision.BlockPlayback)
+        assertEquals(
+            YouTubeStudyEngine.PlaybackCutAction.EXIT_SHORTS_TO_HOME,
+            (blockedShort as YouTubeStudyEngine.StudyDecision.BlockPlayback).cutAction
+        )
+    }
+
+    @Test
+    fun contentProtectionDefaults_keepSafeSearchAndAdultAlwaysOnWithZeroCardMasks() {
+        val defaults = ContentProtectionConfig()
+        assertTrue(defaults.safeSearchEnabled)
+        assertTrue(defaults.inAppAdultFilterEnabled)
+        assertFalse(defaults.youtubeMaskFeedCards)
+        assertTrue(defaults.anyProtectionEnabled)
+    }
+
+    @Test
+    fun publicChannelSearch_usesSingleEncodedChannelFilterAndParsesDesktopAndMobileRenderers() = runTest {
+        val requestedUrls = mutableListOf<String>()
+        val desktopSearchHtml = """
+            <html><body><script>var ytInitialData = {"contents":{"channelRenderer":{"channelId":"UCYO_jab_esuFRV4b17AJtAw","title":{"simpleText":"3Blue1Brown"},"canonicalBaseUrl":"/@3blue1brown","subscriberCountText":{"simpleText":"6.5M subscribers"},"thumbnail":{"thumbnails":[{"url":"//yt3.googleusercontent.com/3b1b.jpg"}]}}}};
+            </script></body></html>
+        """.trimIndent()
+
+        val desktopResolver = YouTubeChannelResolver { url ->
+            requestedUrls.add(url)
+            YouTubeChannelResolver.HttpFetchResult(200, desktopSearchHtml)
+        }
+        val desktopResult = desktopResolver.resolveInput("3Blue1Brown", "")
+        assertTrue(requestedUrls.first().contains("sp=EgIQAg%3D%3D"))
+        assertFalse(requestedUrls.first().contains("%253D"))
+        assertTrue(desktopResult is ChannelLookupState.SearchResults)
+        val desktopChannels = (desktopResult as ChannelLookupState.SearchResults).candidates
+        assertEquals(1, desktopChannels.size)
+        assertEquals("UCYO_jab_esuFRV4b17AJtAw", desktopChannels[0].channelId)
+        assertEquals("3Blue1Brown", desktopChannels[0].title)
+        assertEquals("@3blue1brown", desktopChannels[0].handle)
+        assertEquals("6.5M subscribers", desktopChannels[0].subscriberSummary)
+
+        val mobileSearchHtml = """
+            <html><body><script>var ytInitialData = {"compactChannelRenderer":{"channelId":"UC4a-Gbdw7vOaccHmFo40b9g","displayName":{"runs":[{"text":"ISKCON Desire Tree"}]},"canonicalBaseUrl":"/@iskcondesiretree","subscriberCountText":{"runs":[{"text":"2.1M subscribers"}]},"thumbnail":{"thumbnails":[{"url":"https://yt3.ggpht.com/idt.jpg"}]}}};
+            </script></body></html>
+        """.trimIndent()
+        val mobileResolver = YouTubeChannelResolver {
+            YouTubeChannelResolver.HttpFetchResult(200, mobileSearchHtml)
+        }
+        val mobileResult = mobileResolver.resolveInput("ISKCON Desire Tree", "")
+        assertTrue(mobileResult is ChannelLookupState.SearchResults)
+        val mobileChannels = (mobileResult as ChannelLookupState.SearchResults).candidates
+        assertEquals(1, mobileChannels.size)
+        assertEquals("UC4a-Gbdw7vOaccHmFo40b9g", mobileChannels[0].channelId)
+        assertEquals("ISKCON Desire Tree", mobileChannels[0].title)
+        assertEquals("@iskcondesiretree", mobileChannels[0].handle)
+    }
+
     // -------------------------------------------------------------------------
-    // 5. On-Device In-App Adult-Content Filtering & Strict Mode Guards
+    // 5. On-Device In-App Adult-Content Filtering (Spiritual-Only, Mature Media, Multilingual)
     // -------------------------------------------------------------------------
 
     @Test
-    fun inAppAdultFilter_flagsExplicitQueriesAndPreservesEducationalContent() {
+    fun inAppAdultFilter_allowsSpiritualAndRecoveryContext_butRemovesBiologyLoophole() {
+        // Explicit queries still blocked
         val explicit = InAppAdultFilterEngine.evaluateQueryOrUrl("free xxx porn video")
         assertTrue(explicit.isFlagged)
 
-        val explicitCard = InAppAdultFilterEngine.evaluateCardText(listOf("Hot uncensored adult movie 18+"))
-        assertTrue(explicitCard.isFlagged)
+        // Genuine spiritual / anti-addiction recovery content is permitted
+        val iskconTalk = InAppAdultFilterEngine.evaluateActiveContent(
+            urlOrQuery = "How to overcome porn addiction",
+            visibleSnippets = listOf("ISKCON Desire Tree", "Brahmacharya talk on controlling lust")
+        )
+        assertFalse("Spiritual anti-addiction recovery talk must be allowed", iskconTalk.isFlagged)
 
-        val educationalBio = InAppAdultFilterEngine.evaluateQueryOrUrl("NCERT Class 12 human reproduction biology lecture")
-        assertFalse(educationalBio.isFlagged)
+        val recoveryQuery = InAppAdultFilterEngine.evaluateQueryOrUrl("how to quit porn addiction brahmacharya")
+        assertFalse("Anti-addiction recovery search must be allowed", recoveryQuery.isFlagged)
 
-        val educationalMed = InAppAdultFilterEngine.evaluateCardText(listOf("Breast cancer early screening medical science lecture"))
-        assertFalse(educationalMed.isFlagged)
+        // Keyword stuffing spiritual terms alongside explicit consumption/sites is STILL blocked
+        val gamedSpiritual = InAppAdultFilterEngine.evaluateQueryOrUrl("watch free xxx porn video iskcon")
+        assertTrue("Hard explicit site/consumption terms must never be exempted", gamedSpiritual.isFlagged)
+
+        // Biology/anatomy loophole is REMOVED
+        val anatomyLoophole = InAppAdultFilterEngine.evaluateQueryOrUrl("naked female anatomy nude video biology")
+        assertTrue("Biology/anatomy keywords must NOT exempt explicit content", anatomyLoophole.isFlagged)
+
+        // Approved YouTube channel in Study Mode is trusted even when discussing addiction recovery
+        val approvedChannelVideo = InAppAdultFilterEngine.evaluateActiveContent(
+            urlOrQuery = "Overcoming Porn & Masturbation",
+            visibleSnippets = listOf("Freedom talk"),
+            isApprovedYouTubeChannel = true
+        )
+        assertFalse("Explicitly approved YouTube channel must not be falsely cut", approvedChannelVideo.isFlagged)
+    }
+
+    @Test
+    fun inAppAdultFilter_blocksMatureMediaTrailersAdultOttAndMultilingualUnicode() {
+        // 18+/A-rated/age-restricted YouTube banners & adult OTT / suggestive movie clips
+        assertTrue(
+            InAppAdultFilterEngine.evaluateCardText(
+                listOf("Official Trailer", "Age-restricted video — Sign in to confirm your age")
+            ).isFlagged
+        )
+        assertTrue(
+            InAppAdultFilterEngine.evaluateQueryOrUrl("Ullu hot web series bold scene trailer").isFlagged
+        )
+        assertTrue(
+            InAppAdultFilterEngine.evaluateCardText(
+                listOf("Bollywood New Movie Item Song Kissing Scene")
+            ).isFlagged
+        )
+
+        // Hindi (Devanagari) & Hinglish
+        assertTrue(InAppAdultFilterEngine.evaluateQueryOrUrl("अश्लील वीडियो").isFlagged)
+        assertTrue(InAppAdultFilterEngine.evaluateQueryOrUrl("पोर्न वीडियो").isFlagged)
+        assertTrue(InAppAdultFilterEngine.evaluateQueryOrUrl("desi bhabhi hot video").isFlagged)
+
+        // Global languages (Spanish, Arabic, Russian) + fancy Unicode NFKC evasion
+        assertTrue(InAppAdultFilterEngine.evaluateQueryOrUrl("chica desnudá video porno").isFlagged)
+        assertTrue(InAppAdultFilterEngine.evaluateQueryOrUrl("أفلام إباحية").isFlagged)
+        assertTrue(InAppAdultFilterEngine.evaluateQueryOrUrl("порно видео").isFlagged)
+        assertTrue(InAppAdultFilterEngine.evaluateQueryOrUrl("ｐｏｒｎ ｖｉｄｅｏ").isFlagged)
     }
 
     @Test

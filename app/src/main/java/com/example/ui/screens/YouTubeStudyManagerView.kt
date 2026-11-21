@@ -2,6 +2,7 @@ package com.example.ui.screens
 
 import android.graphics.BitmapFactory
 import android.util.LruCache
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -24,9 +25,12 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.Key
@@ -57,8 +61,10 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -67,6 +73,7 @@ import com.example.domain.VerifiedYouTubeChannel
 import com.example.domain.YouTubeClientSupportTier
 import com.example.ui.FreedomUiState
 import com.example.ui.theme.FreedomGlass
+import com.example.ui.theme.FreedomSwitch
 import com.example.ui.theme.GlassCard
 import com.example.ui.theme.GlassDivider
 import com.example.ui.theme.GlassSegmentedControl
@@ -89,7 +96,6 @@ fun YouTubeStudyManagerView(
     uiState: FreedomUiState,
     channelLookupFlow: StateFlow<ChannelLookupState>,
     onToggleStudyMode: (Boolean) -> Unit,
-    onToggleMaskFeedCards: (Boolean) -> Unit,
     onToggleAllowShorts: (Boolean) -> Unit,
     onToggleAllowLive: (Boolean) -> Unit,
     onSaveApiKey: (String) -> Unit,
@@ -102,16 +108,32 @@ fun YouTubeStudyManagerView(
     onBack: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    BackHandler { onBack() }
+
     val g = FreedomGlass.colors
     val cfg = uiState.contentProtection
     val strictActive = uiState.isStrictModeActive
     val lookupState by channelLookupFlow.collectAsStateWithLifecycle()
+    val keyboardController = LocalSoftwareKeyboardController.current
 
-    var inputMode by remember { mutableIntStateOf(0) } // 0 = URL / Video / Search, 1 = Manual UC... ID
+    val approvedIds = remember(uiState.approvedYouTubeChannels) {
+        uiState.approvedYouTubeChannels.map { it.channelId }.toSet()
+    }
+
+    var inputMode by remember { mutableIntStateOf(0) } // 0 = Search / URL, 1 = Manual UC... ID
     var queryInput by remember { mutableStateOf("") }
     var manualIdInput by remember { mutableStateOf("") }
     var showAdvancedApi by remember { mutableStateOf(false) }
     var apiKeyDraft by remember(cfg.youtubeDataApiKey) { mutableStateOf(cfg.youtubeDataApiKey) }
+
+    val looksLikeUrlOrHandle = remember(queryInput) {
+        val q = queryInput.trim()
+        q.startsWith("http://", ignoreCase = true) ||
+            q.startsWith("https://", ignoreCase = true) ||
+            q.contains("youtube.com", ignoreCase = true) ||
+            q.contains("youtu.be", ignoreCase = true) ||
+            q.startsWith("@")
+    }
 
     Column(modifier = modifier.fillMaxSize()) {
         Row(
@@ -142,6 +164,28 @@ fun YouTubeStudyManagerView(
                     color = g.textSecondary
                 )
             }
+            if (strictActive) {
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(50))
+                        .background(g.lockedAmber.copy(alpha = 0.16f))
+                        .padding(horizontal = 10.dp, vertical = 5.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Lock,
+                        contentDescription = "Locked during Strict Mode",
+                        tint = g.lockedAmber,
+                        modifier = Modifier.size(13.dp)
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Text(
+                        text = "Locked",
+                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
+                        color = g.lockedAmber
+                    )
+                }
+            }
         }
 
         LazyColumn(
@@ -149,26 +193,21 @@ fun YouTubeStudyManagerView(
             contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 4.dp, bottom = 36.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            // 1. Study Mode Rules Card
+            // 1. Study Mode Rules Card (Zero floating overlays — cuts unapproved playback cleanly in-app)
             item(key = "yt_rules_card") {
-                GlassCard(contentPadding = PaddingValues(0.dp)) {
-                    ProtectionToggleRow(
+                GlassCard(
+                    accentBorderColor = if (cfg.youtubeStudyModeEnabled) g.primaryAccent else null,
+                    contentPadding = PaddingValues(0.dp)
+                ) {
+                    StudyToggleRow(
                         title = "Enable YouTube Study Mode",
-                        subtitle = "Keep normal Home, Search & Recommendations while allowing only approved channels.",
+                        subtitle = "Keep normal browsing & search while allowing playback only from approved channels. Cuts unapproved videos cleanly inside YouTube.",
                         checked = cfg.youtubeStudyModeEnabled,
                         onCheckedChange = onToggleStudyMode,
                         testTag = "yt_study_master_switch"
                     )
                     GlassDivider()
-                    ProtectionToggleRow(
-                        title = "Mask unapproved cards in feeds",
-                        subtitle = "Covers unapproved video cards with a lightweight single-canvas shield while keeping approved cards open.",
-                        checked = cfg.youtubeMaskFeedCards,
-                        onCheckedChange = onToggleMaskFeedCards,
-                        testTag = "yt_mask_cards_switch"
-                    )
-                    GlassDivider()
-                    ProtectionToggleRow(
+                    StudyToggleRow(
                         title = "Allow Shorts from approved channels",
                         subtitle = "Blocked by default. When enabled, only Shorts from approved channels can play.",
                         checked = cfg.youtubeAllowShortsFromApproved,
@@ -176,7 +215,7 @@ fun YouTubeStudyManagerView(
                         testTag = "yt_allow_shorts_switch"
                     )
                     GlassDivider()
-                    ProtectionToggleRow(
+                    StudyToggleRow(
                         title = "Allow Live streams from approved channels",
                         subtitle = "Blocked by default. When enabled, only live streams from approved channels can play.",
                         checked = cfg.youtubeAllowLiveFromApproved,
@@ -186,7 +225,7 @@ fun YouTubeStudyManagerView(
                 }
             }
 
-            // 2. Hybrid Add Approved Channel Card
+            // 2. Direct In-App YouTube Channel Search & Verification Card
             item(key = "yt_add_channel_card") {
                 GlassCard(contentPadding = PaddingValues(18.dp)) {
                     Row(
@@ -195,7 +234,7 @@ fun YouTubeStudyManagerView(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "Add Verified Channel",
+                            text = "Search & Add Channels",
                             style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
                             color = g.textPrimary
                         )
@@ -219,14 +258,14 @@ fun YouTubeStudyManagerView(
 
                     Spacer(Modifier.height(6.dp))
                     Text(
-                        text = "Every channel's permanent UC... ID is verified before approval. Paste a channel URL, a video link, search by name, or verify a manual UC... ID.",
+                        text = "Search YouTube channels directly by name (no URL needed), or paste any channel/video link. Permanent UC... IDs are verified before saving.",
                         style = MaterialTheme.typography.bodySmall,
                         color = g.textSecondary
                     )
                     Spacer(Modifier.height(12.dp))
 
                     GlassSegmentedControl(
-                        options = listOf("URL / Video / Search", "Manual UC... ID"),
+                        options = listOf("Search / URL", "Manual UC... ID"),
                         selectedIndex = inputMode,
                         onSelect = {
                             inputMode = it
@@ -257,7 +296,7 @@ fun YouTubeStudyManagerView(
                             Box(modifier = Modifier.weight(1f)) {
                                 if (queryInput.isEmpty()) {
                                     Text(
-                                        text = "Channel URL, video link, @handle, or name…",
+                                        text = "Search channel name (e.g. ISKCON, Khan Academy)…",
                                         style = MaterialTheme.typography.bodyMedium,
                                         color = g.textMuted,
                                         maxLines = 1,
@@ -269,6 +308,13 @@ fun YouTubeStudyManagerView(
                                     onValueChange = { queryInput = it },
                                     singleLine = true,
                                     enabled = !strictActive,
+                                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                                    keyboardActions = KeyboardActions(
+                                        onSearch = {
+                                            keyboardController?.hide()
+                                            if (!strictActive) onLookupChannel(queryInput)
+                                        }
+                                    ),
                                     textStyle = MaterialTheme.typography.bodyMedium.copy(color = g.textPrimary),
                                     cursorBrush = SolidColor(g.primaryAccent),
                                     modifier = Modifier
@@ -276,10 +322,27 @@ fun YouTubeStudyManagerView(
                                         .testTag("yt_channel_search_input")
                                 )
                             }
+                            if (queryInput.isNotEmpty() && !strictActive) {
+                                Spacer(Modifier.width(6.dp))
+                                Icon(
+                                    imageVector = Icons.Rounded.Close,
+                                    contentDescription = "Clear search",
+                                    tint = g.textSecondary,
+                                    modifier = Modifier
+                                        .size(18.dp)
+                                        .clickable {
+                                            queryInput = ""
+                                            onResetLookup()
+                                        }
+                                )
+                            }
                         }
                         Spacer(Modifier.height(10.dp))
                         Button(
-                            onClick = { onLookupChannel(queryInput) },
+                            onClick = {
+                                keyboardController?.hide()
+                                onLookupChannel(queryInput)
+                            },
                             enabled = !strictActive && lookupState !is ChannelLookupState.Loading,
                             shape = RoundedCornerShape(14.dp),
                             colors = ButtonDefaults.buttonColors(
@@ -292,7 +355,7 @@ fun YouTubeStudyManagerView(
                                 .testTag("yt_verify_channel_button")
                         ) {
                             Text(
-                                text = "Resolve & Verify Channel",
+                                text = if (looksLikeUrlOrHandle) "Verify Channel Link" else "Search YouTube Channels",
                                 style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold)
                             )
                         }
@@ -319,6 +382,13 @@ fun YouTubeStudyManagerView(
                                     onValueChange = { manualIdInput = it },
                                     singleLine = true,
                                     enabled = !strictActive,
+                                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                                    keyboardActions = KeyboardActions(
+                                        onDone = {
+                                            keyboardController?.hide()
+                                            if (!strictActive) onVerifyManualChannelId(manualIdInput)
+                                        }
+                                    ),
                                     textStyle = MaterialTheme.typography.bodyMedium.copy(color = g.textPrimary),
                                     cursorBrush = SolidColor(g.primaryAccent),
                                     modifier = Modifier
@@ -329,7 +399,10 @@ fun YouTubeStudyManagerView(
                         }
                         Spacer(Modifier.height(10.dp))
                         Button(
-                            onClick = { onVerifyManualChannelId(manualIdInput) },
+                            onClick = {
+                                keyboardController?.hide()
+                                onVerifyManualChannelId(manualIdInput)
+                            },
                             enabled = !strictActive && lookupState !is ChannelLookupState.Loading,
                             shape = RoundedCornerShape(14.dp),
                             colors = ButtonDefaults.buttonColors(
@@ -348,7 +421,7 @@ fun YouTubeStudyManagerView(
                         }
                     }
 
-                    // Lookup Feedback / Candidate Verification Card
+                    // Lookup Feedback / Live Search Results / Confirmation Preview
                     when (val state = lookupState) {
                         ChannelLookupState.Idle -> Unit
 
@@ -377,6 +450,7 @@ fun YouTubeStudyManagerView(
                             Spacer(Modifier.height(14.dp))
                             VerifiedChannelConfirmationCard(
                                 channel = state.channel,
+                                isAlreadyApproved = state.channel.channelId in approvedIds,
                                 onConfirm = {
                                     onConfirmApproveChannel(state.channel)
                                     queryInput = ""
@@ -389,27 +463,34 @@ fun YouTubeStudyManagerView(
                         is ChannelLookupState.SearchResults -> {
                             Spacer(Modifier.height(14.dp))
                             Text(
-                                text = "Select a verified channel to confirm (${state.source.label}):",
+                                text = "Tap a verified channel to approve (${state.candidates.size} found):",
                                 style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
                                 color = g.textSecondary
                             )
                             Spacer(Modifier.height(8.dp))
                             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                 state.candidates.forEach { candidate ->
+                                    val alreadyApproved = candidate.channelId in approvedIds
                                     Row(
                                         modifier = Modifier
                                             .fillMaxWidth()
                                             .clip(RoundedCornerShape(14.dp))
                                             .background(g.glassSurface)
-                                            .border(1.dp, g.glassBorder, RoundedCornerShape(14.dp))
-                                            .clickable { onSelectSearchCandidate(candidate) }
+                                            .border(
+                                                1.dp,
+                                                if (alreadyApproved) g.shieldActive.copy(alpha = 0.45f) else g.glassBorder,
+                                                RoundedCornerShape(14.dp)
+                                            )
+                                            .clickable(enabled = !alreadyApproved && !strictActive) {
+                                                onSelectSearchCandidate(candidate)
+                                            }
                                             .padding(horizontal = 12.dp, vertical = 10.dp),
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
                                         ChannelAvatar(
                                             avatarUrl = candidate.avatarUrl,
                                             title = candidate.title,
-                                            sizeDp = 40
+                                            sizeDp = 42
                                         )
                                         Spacer(Modifier.width(12.dp))
                                         Column(modifier = Modifier.weight(1f)) {
@@ -420,23 +501,42 @@ fun YouTubeStudyManagerView(
                                                 maxLines = 1,
                                                 overflow = TextOverflow.Ellipsis
                                             )
+                                            val meta = buildList {
+                                                if (candidate.handle.isNotEmpty()) add(candidate.handle)
+                                                if (candidate.subscriberSummary.isNotEmpty()) add(candidate.subscriberSummary)
+                                            }.joinToString(" · ")
+                                            if (meta.isNotEmpty()) {
+                                                Text(
+                                                    text = meta,
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = g.primaryAccent,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                            }
                                             Text(
-                                                text = buildString {
-                                                    if (candidate.handle.isNotEmpty()) append("${candidate.handle} · ")
-                                                    append(candidate.channelId)
-                                                },
+                                                text = candidate.channelId,
                                                 style = MaterialTheme.typography.labelSmall,
-                                                color = g.textSecondary,
+                                                color = g.textMuted,
                                                 maxLines = 1,
                                                 overflow = TextOverflow.Ellipsis
                                             )
                                         }
-                                        Icon(
-                                            imageVector = Icons.Rounded.CheckCircle,
-                                            contentDescription = "Review channel",
-                                            tint = g.primaryAccent,
-                                            modifier = Modifier.size(20.dp)
-                                        )
+                                        Spacer(Modifier.width(8.dp))
+                                        if (alreadyApproved) {
+                                            Text(
+                                                text = "Approved",
+                                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
+                                                color = g.shieldActive
+                                            )
+                                        } else {
+                                            Icon(
+                                                imageVector = Icons.Rounded.CheckCircle,
+                                                contentDescription = "Review and approve channel",
+                                                tint = g.primaryAccent,
+                                                modifier = Modifier.size(22.dp)
+                                            )
+                                        }
                                     }
                                 }
                             }
@@ -497,7 +597,7 @@ fun YouTubeStudyManagerView(
                         )
                         Spacer(Modifier.height(4.dp))
                         Text(
-                            text = "Add study channels above. Once Study Mode is active, only videos from your approved channels can play across YouTube, Morphe YT, ReVanced, and supported clients.",
+                            text = "Search and approve your study or spiritual channels above. Once Study Mode is active, only videos from your approved channels can play across YouTube, Morphe YT, ReVanced, and supported clients.",
                             style = MaterialTheme.typography.bodySmall,
                             color = g.textSecondary
                         )
@@ -658,7 +758,7 @@ fun YouTubeStudyManagerView(
                                 color = g.textPrimary
                             )
                             Text(
-                                text = if (cfg.youtubeDataApiKey.isNotEmpty()) "Fallback key configured locally" else "Not required · Used only if public lookup fails",
+                                text = if (cfg.youtubeDataApiKey.isNotEmpty()) "Fallback key configured locally" else "Not required · Used only if public search is rate-limited",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = g.textSecondary
                             )
@@ -676,7 +776,7 @@ fun YouTubeStudyManagerView(
                             verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
                             Text(
-                                text = "Primary channel verification works with zero API key. Optionally add your own YouTube Data API v3 key as a fallback if public lookups are ever rate-limited. Stored strictly on this device.",
+                                text = "In-app channel search works with zero API key. Optionally add your own YouTube Data API v3 key as a fallback if public lookups are ever rate-limited. Stored strictly on this device.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = g.textSecondary
                             )
@@ -727,8 +827,46 @@ fun YouTubeStudyManagerView(
 }
 
 @Composable
+private fun StudyToggleRow(
+    title: String,
+    subtitle: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    testTag: String
+) {
+    val g = FreedomGlass.colors
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 18.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.SemiBold),
+                color = g.textPrimary
+            )
+            Spacer(Modifier.height(2.dp))
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = g.textSecondary
+            )
+        }
+        Spacer(Modifier.width(12.dp))
+        FreedomSwitch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            modifier = Modifier.testTag(testTag)
+        )
+    }
+}
+
+@Composable
 private fun VerifiedChannelConfirmationCard(
     channel: VerifiedYouTubeChannel,
+    isAlreadyApproved: Boolean,
     onConfirm: () -> Unit,
     onCancel: () -> Unit
 ) {
@@ -792,6 +930,7 @@ private fun VerifiedChannelConfirmationCard(
             }
             Button(
                 onClick = onConfirm,
+                enabled = !isAlreadyApproved,
                 shape = RoundedCornerShape(12.dp),
                 colors = ButtonDefaults.buttonColors(
                     containerColor = g.primaryAccent,
@@ -802,7 +941,10 @@ private fun VerifiedChannelConfirmationCard(
                     .height(44.dp)
                     .testTag("confirm_approve_yt_channel_button")
             ) {
-                Text("Approve Channel", fontWeight = FontWeight.SemiBold)
+                Text(
+                    text = if (isAlreadyApproved) "Already Approved" else "Approve Channel",
+                    fontWeight = FontWeight.SemiBold
+                )
             }
         }
     }

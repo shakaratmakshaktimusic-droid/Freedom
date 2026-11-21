@@ -26,9 +26,23 @@ object YouTubeStudyEngine {
     enum class ScreenMode {
         FEED_OR_SEARCH,
         WATCH_PLAYER,
+        MINI_PLAYER,
         SHORTS_PLAYER,
         LIVE_PLAYER,
         CHANNEL_PAGE
+    }
+
+    enum class PlaybackCutAction {
+        /** Collapse watch player via Back, then immediately close YouTube's bottom miniplayer (×) so audio/video stops without entering PiP. */
+        CLOSE_WATCH_AND_MINIPLAYER,
+        /** Close YouTube's bottom in-app miniplayer (×) directly while staying on the feed. */
+        CLOSE_MINIPLAYER_ONLY,
+        /** Exit Shorts directly to YouTube's Home tab / Back without exiting the YouTube app into PiP. */
+        EXIT_SHORTS_TO_HOME,
+        /** Close an active Picture-in-Picture floating window directly. */
+        CLOSE_PIP_WINDOW,
+        /** Evict an unverifiable third-party client app to Home (Strict Mode only). */
+        EVICT_CLIENT_HOME
     }
 
     data class ApprovedChannelSnapshot(
@@ -73,7 +87,12 @@ object YouTubeStudyEngine {
         data class BlockPlayback(
             val reason: String,
             val notificationText: String,
-            val navigateHome: Boolean = false
+            val navigateHome: Boolean = false,
+            val cutAction: PlaybackCutAction = if (navigateHome) {
+                PlaybackCutAction.EVICT_CLIENT_HOME
+            } else {
+                PlaybackCutAction.CLOSE_WATCH_AND_MINIPLAYER
+            }
         ) : StudyDecision()
         data class NeedsVideoChannelVerification(
             val videoId: String,
@@ -220,7 +239,7 @@ object YouTubeStudyEngine {
     }
 
     /**
-     * Evaluates an active Watch, Shorts, or Live playback screen inside any supported YouTube client.
+     * Evaluates an active Watch, Miniplayer, Shorts, or Live playback screen inside any supported YouTube client.
      */
     fun evaluateActivePlayback(
         screenMode: ScreenMode,
@@ -229,7 +248,8 @@ object YouTubeStudyEngine {
         detectedChannelTitle: String?,
         approved: ApprovedChannelSnapshot,
         config: ContentProtectionConfig,
-        strictMode: Boolean
+        strictMode: Boolean,
+        lastApprovedWatchActive: Boolean = false
     ): StudyDecision {
         if (!config.youtubeStudyModeEnabled) return StudyDecision.Allow
 
@@ -238,7 +258,8 @@ object YouTubeStudyEngine {
             if (!config.youtubeAllowShortsFromApproved) {
                 return StudyDecision.BlockPlayback(
                     reason = "YouTube Shorts blocked by Study Mode",
-                    notificationText = "YouTube Shorts are blocked by Freedom Study Mode."
+                    notificationText = "YouTube Shorts are blocked by Freedom Study Mode.",
+                    cutAction = PlaybackCutAction.EXIT_SHORTS_TO_HOME
                 )
             }
             val matched = approved.matchesAttribution(detectedChannelId, detectedHandle, detectedChannelTitle)
@@ -253,7 +274,8 @@ object YouTubeStudyEngine {
                         } else {
                             "Unverified Short blocked in Strict Mode"
                         },
-                        notificationText = "Only approved channels can play in Study Mode."
+                        notificationText = "Only approved channels can play in Study Mode.",
+                        cutAction = PlaybackCutAction.EXIT_SHORTS_TO_HOME
                     )
                 }
             }
@@ -265,14 +287,42 @@ object YouTubeStudyEngine {
             if (!config.youtubeAllowLiveFromApproved) {
                 return StudyDecision.BlockPlayback(
                     reason = "YouTube Live stream blocked by Study Mode",
-                    notificationText = "Live streams are blocked by Freedom Study Mode."
+                    notificationText = "Live streams are blocked by Freedom Study Mode.",
+                    cutAction = PlaybackCutAction.CLOSE_WATCH_AND_MINIPLAYER
                 )
             }
             val matched = approved.matchesAttribution(detectedChannelId, detectedHandle, detectedChannelTitle)
             if (!matched) {
                 return StudyDecision.BlockPlayback(
                     reason = "Live stream from unapproved or unverified channel blocked",
-                    notificationText = "Only approved channels can play in Study Mode."
+                    notificationText = "Only approved channels can play in Study Mode.",
+                    cutAction = PlaybackCutAction.CLOSE_WATCH_AND_MINIPLAYER
+                )
+            }
+            return StudyDecision.Allow
+        }
+
+        // In-app bottom Miniplayer: if an unapproved video collapsed here, close it immediately (×)
+        if (screenMode == ScreenMode.MINI_PLAYER) {
+            if (approved.isEmpty) {
+                return StudyDecision.BlockPlayback(
+                    reason = "Miniplayer stopped (no approved channels)",
+                    notificationText = "Add approved channels in Freedom Study Mode to watch videos.",
+                    cutAction = PlaybackCutAction.CLOSE_MINIPLAYER_ONLY
+                )
+            }
+            val matched = approved.matchesAttribution(detectedChannelId, detectedHandle, detectedChannelTitle)
+            if (matched) return StudyDecision.Allow
+
+            val hasAttribution = !detectedChannelId.isNullOrBlank() ||
+                !detectedHandle.isNullOrBlank() ||
+                !detectedChannelTitle.isNullOrBlank()
+
+            if (hasAttribution || !lastApprovedWatchActive) {
+                return StudyDecision.BlockPlayback(
+                    reason = "Unapproved video stopped in YouTube miniplayer",
+                    notificationText = "Video stopped — channel not in your Study Mode allowlist.",
+                    cutAction = PlaybackCutAction.CLOSE_MINIPLAYER_ONLY
                 )
             }
             return StudyDecision.Allow
@@ -283,7 +333,8 @@ object YouTubeStudyEngine {
             if (approved.isEmpty) {
                 return StudyDecision.BlockPlayback(
                     reason = "No approved channels configured in YouTube Study Mode",
-                    notificationText = "Add approved channels in Freedom Study Mode to watch videos."
+                    notificationText = "Add approved channels in Freedom Study Mode to watch videos.",
+                    cutAction = PlaybackCutAction.CLOSE_WATCH_AND_MINIPLAYER
                 )
             }
             val matched = approved.matchesAttribution(detectedChannelId, detectedHandle, detectedChannelTitle)
@@ -296,7 +347,8 @@ object YouTubeStudyEngine {
             if (hasAttribution) {
                 return StudyDecision.BlockPlayback(
                     reason = "Video from unapproved YouTube channel blocked",
-                    notificationText = "Channel not in your Study Mode allowlist."
+                    notificationText = "Channel not in your Study Mode allowlist.",
+                    cutAction = PlaybackCutAction.CLOSE_WATCH_AND_MINIPLAYER
                 )
             }
 
@@ -304,7 +356,8 @@ object YouTubeStudyEngine {
             if (strictMode) {
                 return StudyDecision.BlockPlayback(
                     reason = "Unverifiable YouTube channel blocked in Strict Mode",
-                    notificationText = "Playback blocked — channel could not be verified in Strict Mode."
+                    notificationText = "Playback blocked — channel could not be verified in Strict Mode.",
+                    cutAction = PlaybackCutAction.CLOSE_WATCH_AND_MINIPLAYER
                 )
             }
         }
